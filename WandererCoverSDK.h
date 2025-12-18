@@ -79,7 +79,6 @@ extern "C"
 	{
 		int coverState;				/* Current cover state (0 = close, 1 = open)*/
 		float currentPositionAngle; /* Current motor position angle */
-		float inputVoltage;			/* Input voltage */
 		float closePositionAngle;	/* Closed position angle */
 		float openPositionAngle;	/* Open position angle */
 	} WC_COVER_STATUS;

@@ -70,6 +70,24 @@ namespace WandererCover
      */
     bool QueryHandshake(std::shared_ptr<Device> device);
 
+    /**
+     * Start listening for movement completion messages.
+     * Spawns a background thread that reads serial data until movement finishes.
+     * Should be called before triggering a move command.
+     *
+     * @param device Device to listen on
+     */
+    void StartMoveListener(std::shared_ptr<Device> device);
+
+    /**
+     * Stop listening for movement completion messages.
+     * Terminates the background listener thread.
+     * Should be called after movement finishes.
+     *
+     * @param device Device to stop listening on
+     */
+    void StopMoveListener(std::shared_ptr<Device> device);
+
 } /* namespace WandererCover */
 
 #endif /* WANDERER_COVER_PROTOCOL_H */

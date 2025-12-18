@@ -23,7 +23,7 @@
 # ###############################################################################
 
 cmake_minimum_required(VERSION 3.22)
-project(WandererCoverSDK VERSION 1.0.0 DESCRIPTION "Wanderer Cover SDK for telescope control")
+project(WandererCoverSDK VERSION 1.1.0 DESCRIPTION "Wanderer Cover SDK for telescope control")
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

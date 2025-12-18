@@ -30,6 +30,8 @@
 #include <string>
 #include <map>
 #include <mutex>
+#include <thread>
+#include <atomic>
 
 namespace WandererCover
 {
@@ -45,10 +47,17 @@ namespace WandererCover
 		float closePositionAngle = 0.0f;
 		float openPositionAngle = 0.0f;
 		float currentPositionAngle = 0.0f;
-		float inputVoltage = 0.0f;
 		int brightness = 0;
 		int heaterPower = 0;
 		int asiairControl = 0;
+		int movingState = 0;
+
+		/* Listener thread state - don't store thread, just the flag */
+		std::atomic<bool> listenerRunning{false};
+		std::mutex listenerMutex;
+
+		/* Simple destructor - nothing to clean up */
+		~Device() = default;
 	};
 
 	/**

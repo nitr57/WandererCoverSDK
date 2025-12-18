@@ -44,7 +44,7 @@
 #include <dirent.h>
 #include <libudev.h>
 
-#define SDK_VERSION "1.0.0"
+#define SDK_VERSION "1.1.0"
 
 /* Import internal implementation for use in public C API */
 using namespace WandererCover;
@@ -282,11 +282,6 @@ WCAPI WC_ERROR_TYPE WCCoverGetConfig(int id, WC_COVER_CONFIG *config)
 
 	auto device = it->second;
 
-	if (!QueryStatus(device))
-	{
-		return WC_ERROR_COMMUNICATION;
-	}
-
 	config->brightness = device->brightness;
 	config->heaterPower = device->heaterPower;
 	config->asiairControl = device->asiairControl;
@@ -458,13 +453,16 @@ WCAPI WC_ERROR_TYPE WCCoverGetStatus(int id, WC_COVER_STATUS *status)
 
 	auto device = it->second;
 
-	if (!QueryStatus(device))
-	{
-		return WC_ERROR_COMMUNICATION;
-	}
-
 	/* Determine cover state based on current position */
-	if (device->currentPositionAngle <= device->closePositionAngle + 1.0f)
+	if (device->movingState == 1)
+	{
+		status->coverState = 3; /* MOVING */
+	}
+	else if (device->movingState == 2)
+	{
+		status->coverState = 4; /* UNKNOWN */
+	}
+	else if (device->currentPositionAngle <= device->closePositionAngle + 1.0f)
 	{
 		status->coverState = 0; /* CLOSED */
 	}
@@ -478,7 +476,6 @@ WCAPI WC_ERROR_TYPE WCCoverGetStatus(int id, WC_COVER_STATUS *status)
 	}
 
 	status->currentPositionAngle = device->currentPositionAngle;
-	status->inputVoltage = device->inputVoltage;
 	status->closePositionAngle = device->closePositionAngle;
 	status->openPositionAngle = device->openPositionAngle;
 
@@ -531,6 +528,9 @@ WCAPI WC_ERROR_TYPE WCCoverOpenCover(int id)
 		return WC_ERROR_COMMUNICATION;
 	}
 
+	/* Mark device as moving - status will be updated when response arrives */
+	StartMoveListener(device);
+
 	return WC_SUCCESS;
 }
 
@@ -556,6 +556,9 @@ WCAPI WC_ERROR_TYPE WCCoverCloseCover(int id)
 	{
 		return WC_ERROR_COMMUNICATION;
 	}
+
+	/* Mark device as moving - status will be updated when response arrives */
+	StartMoveListener(device);
 
 	return WC_SUCCESS;
 }

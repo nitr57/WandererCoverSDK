@@ -56,22 +56,7 @@ void DisplayStatus(int deviceId)
 		printf("Current Position: %.2f°\n", status.currentPositionAngle);
 		printf("Close Position: %.2f°\n", status.closePositionAngle);
 		printf("Open Position: %.2f°\n", status.openPositionAngle);
-		printf("Input Voltage: %.2fV\n", status.inputVoltage);
-		
-		/* Determine cover state based on current position */
-		if (status.currentPositionAngle <= status.closePositionAngle + 1.0f)
-		{
-			printf("Cover State: CLOSED\n");
-		}
-		else if (status.currentPositionAngle >= status.openPositionAngle - 1.0f)
-		{
-			printf("Cover State: OPEN\n");
-		}
-		else
-		{
-			printf("Cover State: INTERMEDIATE (%.2f° from close)\n", 
-				   status.currentPositionAngle - status.closePositionAngle);
-		}
+		printf("Cover State: %s", status.coverState == 1 ? "OPEN" : (status.coverState == 0 ? "CLOSED" : (status.coverState == 2 ? "INTERMEDIATE" : "MOVING")));
 	}
 	else
 	{
