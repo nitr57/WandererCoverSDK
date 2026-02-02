@@ -1,7 +1,7 @@
 /* *******************************************************************************
  * MIT License
  *
- * Copyright (c) 2025 Nico Trost
+ * Copyright (c) 2025-2026 Nico Trost
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -24,37 +24,155 @@
 
 #include "WandererCoverSerialPort.h"
 #include "WandererCoverLogging.h"
+#ifdef _WIN32
+#include <windows.h>
+#include <string>
+#else
 #include <unistd.h>
 #include <fcntl.h>
 #include <termios.h>
 #include <sys/select.h>
+#include <sys/ioctl.h>
+#endif
 #include <cerrno>
 #include <cctype>
-#include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <chrono>
+#include <thread>
+#include <algorithm>
 
 namespace WandererCover
 {
+#ifdef _WIN32
+    static std::string ToDevicePath(const char *portName)
+    {
+        // Accept either "COM3" or "\\.\\COM3" style input
+        std::string s(portName);
+        if (s.rfind("\\\\.", 0) == 0)
+            return s;
+        if (s.rfind("COM", 0) == 0 && s.size() > 3)
+        {
+            // COM10+ require \\.\\ prefix
+            return std::string("\\\\.\\") + s;
+        }
+        if (s.rfind("COM", 0) == 0)
+            return s;
+        return s; // fallback
+    }
+#endif
+
     bool SerialPort::Open(const char *portName)
     {
         WC_DEBUG("SerialPort::Open: Attempting to open %s", portName);
+#ifdef _WIN32
+        std::string device = ToDevicePath(portName);
 
-        /* Open without O_NONBLOCK to allow blocking I/O */
-        fd = open(portName, O_RDWR | O_NOCTTY);
-        WC_DEBUG("SerialPort::Open: open() returned fd=%d", fd);
-
-        if (fd < 0)
+        HANDLE h = CreateFileA(device.c_str(),
+                               GENERIC_READ | GENERIC_WRITE,
+                               0,
+                               NULL,
+                               OPEN_EXISTING,
+                               FILE_ATTRIBUTE_NORMAL,
+                               NULL);
+        if (h == INVALID_HANDLE_VALUE)
         {
-            WC_ERROR("SerialPort::Open: Failed to open port %s (errno=%d)", portName, errno);
+            WC_ERROR("SerialPort::Open: Failed to open port %s (errno=%lu)", device.c_str(), GetLastError());
             return false;
         }
 
+        DCB dcb = {0};
+        dcb.DCBlength = sizeof(DCB);
+        if (!GetCommState(h, &dcb))
+        {
+            WC_ERROR("SerialPort::Open: GetCommState failed (err=%lu)", GetLastError());
+            CloseHandle(h);
+            return false;
+        }
+
+        // Configure 115200 8N1 NOFLOW
+        dcb.BaudRate = CBR_115200;
+        dcb.ByteSize = 8;
+        dcb.Parity = NOPARITY;
+        dcb.StopBits = ONESTOPBIT;
+        dcb.fDtrControl = DTR_CONTROL_DISABLE;
+        dcb.fRtsControl = RTS_CONTROL_DISABLE;
+        dcb.fOutxCtsFlow = FALSE;
+        dcb.fOutxDsrFlow = FALSE;
+        dcb.fDsrSensitivity = FALSE;
+        dcb.fNull = FALSE;
+        dcb.fBinary = TRUE;
+        dcb.fAbortOnError = FALSE;
+
+        if (!SetCommState(h, &dcb))
+        {
+            WC_ERROR("SerialPort::Open: SetCommState failed (err=%lu)", GetLastError());
+            CloseHandle(h);
+            return false;
+        }
+
+        COMMTIMEOUTS timeouts = {0};
+        timeouts.ReadIntervalTimeout = 50;
+        timeouts.ReadTotalTimeoutMultiplier = 0;
+        timeouts.ReadTotalTimeoutConstant = 0;
+        timeouts.WriteTotalTimeoutMultiplier = 0;
+        timeouts.WriteTotalTimeoutConstant = 5000;
+        SetCommTimeouts(h, &timeouts);
+
+        /* Save handle in fd variable (support 64-bit handles on Win64) */
+        fd = (intptr_t)h;
+
+        WC_DEBUG("SerialPort::Open: Opened %s (handle=%p)", device.c_str(), h);
+#else
+        /* Try to open with retry logic for busy ports */
+        int open_fd = -1;
+        int attempt = 0;
+        int delayMs = retryDelayMs;
+
+        while (attempt < maxRetries && open_fd < 0)
+        {
+            /* Open without O_NONBLOCK to allow blocking I/O */
+            open_fd = open(portName, O_RDWR | O_NOCTTY);
+            WC_DEBUG("SerialPort::Open: Attempt %d/%d, open() returned fd=%d", 
+                     attempt + 1, maxRetries, open_fd);
+
+            if (open_fd < 0)
+            {
+                int last_errno = errno;
+                /* EBUSY means resource is busy, worth retrying */
+                /* EAGAIN means resource temporarily unavailable, worth retrying */
+                if ((last_errno == EBUSY || last_errno == EAGAIN || last_errno == EACCES) 
+                    && attempt < maxRetries - 1)
+                {
+                    WC_DEBUG("SerialPort::Open: Port busy/unavailable (errno=%d), retrying in %dms...",
+                            last_errno, delayMs);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
+                    delayMs = (delayMs * 3) / 2; /* 1.5x exponential backoff */
+                    attempt++;
+                    continue;
+                }
+                else
+                {
+                    WC_ERROR("SerialPort::Open: Failed to open port %s (errno=%d, attempt %d/%d)", 
+                             portName, last_errno, attempt + 1, maxRetries);
+                    return false;
+                }
+            }
+        }
+
+        if (open_fd < 0)
+        {
+            WC_ERROR("SerialPort::Open: Failed to open port %s after %d retries", portName, maxRetries);
+            return false;
+        }
+
+        fd = (intptr_t)open_fd;
+
         struct termios tty;
-        if (tcgetattr(fd, &tty) != 0)
+        if (tcgetattr(open_fd, &tty) != 0)
         {
             WC_ERROR("SerialPort::Open: tcgetattr failed (errno=%d)", errno);
-            close(fd);
+            close(open_fd);
             fd = -1;
             return false;
         }
@@ -73,13 +191,13 @@ namespace WandererCover
          *   HUPCL    - Hang up on last close
          *   CRTSCTS  - RTS/CTS flow control (we don't need it)
          */
-        
+
         tty.c_cflag |= (CLOCAL | CREAD);
         /* Set:
          *   CLOCAL   - Ignore modem control lines, local connection
          *   CREAD    - Enable receiving characters
          */
-        
+
         tty.c_cflag |= CS8;     /* 8 bit data width */
         tty.c_cc[VMIN] = 0;     /* Minimum characters to read (non-blocking) */
         tty.c_cc[VTIME] = 0;    /* Read timeout in deciseconds (0 = none, we use select()) */
@@ -96,7 +214,7 @@ namespace WandererCover
          *   IXON     - Enable software flow control (output)
          *   IXANY    - Allow any character to restart output
          */
-        
+
         tty.c_iflag |= INPCK | IGNPAR | IGNBRK;
         /* Set:
          *   INPCK    - Enable parity checking
@@ -122,128 +240,225 @@ namespace WandererCover
          *   IEXTEN   - Enable implementation-defined extensions
          *   TOSTOP   - Send SIGSTOP when background process writes to terminal
          */
-        
+
         tty.c_lflag |= NOFLSH;
         /* Set:
          *   NOFLSH   - Don't flush I/O buffers on signal
          */
 
-        tcflush(fd, TCIOFLUSH);
+        tcflush((int)fd, TCIOFLUSH);
 
-        if (tcsetattr(fd, TCSANOW, &tty) != 0)
+        if (tcsetattr((int)fd, TCSANOW, &tty) != 0)
         {
             WC_ERROR("SerialPort::Open: tcsetattr failed (errno=%d)", errno);
-            close(fd);
+            close((int)fd);
             fd = -1;
             return false;
         }
         WC_DEBUG("SerialPort::Open: tcsetattr succeeded");
 
         tcflush(fd, TCIOFLUSH);
-        WC_DEBUG("SerialPort::Open: Successfully opened %s (fd=%d)", portName, fd);
+        WC_DEBUG("SerialPort::Open: Successfully opened %s (fd=%d)", portName, (int)fd);
+#endif
         return true;
     }
 
     void SerialPort::Close()
     {
-        if (fd >= 0)
+        if (fd != -1)
         {
-            close(fd);
+#ifdef _WIN32
+            HANDLE h = (HANDLE)fd;
+            CloseHandle(h);
+#else
+            close((int)fd);
+#endif
             fd = -1;
+        }
+
+        /* Clear the receive buffer when port is closed to prevent stale data from
+           affecting subsequent reads if the same port is reopened */
+        {
+            std::lock_guard<std::mutex> lock(rxMutex);
+            rxBuffer.clear();
         }
     }
 
     bool SerialPort::Write(const unsigned char *data, int len)
     {
-        if (fd < 0)
+        if (fd == -1)
         {
             return false;
         }
-        int written = write(fd, data, len);
-        WC_DEBUG("Write: fd=%d, wrote %d/%d bytes", fd, written, len);
+
+#ifdef _WIN32
+        HANDLE h = (HANDLE)fd;
+        DWORD written = 0;
+        if (!WriteFile(h, data, (DWORD)len, &written, NULL))
+        {
+            WC_ERROR("SerialPort::Write (win): WriteFile failed (err=%lu)", GetLastError());
+            return false;
+        }
+#else
+        int written = write((int)fd, data, len);
+        WC_DEBUG("Write: fd=%d, wrote %d/%d bytes (%s)", (int)fd, written, len, data);
+#endif
+
         /* Wait for all data to be sent */
-        tcdrain(fd);
-        return written == len;
+        Drain();
+        return (int)written == len;
     }
 
-    int SerialPort::Read(unsigned char *buf, int maxlen, int timeoutMs)
+    int SerialPort::Read(unsigned char *buf, int maxlen, char stop_char, int timeoutMs)
     {
-        /* Flush any stale data first */
-        if (fd >= 0)
-        {
-            tcflush(fd, TCIFLUSH);
-        }
+        if (fd == -1 || maxlen <= 1)
+            return 0;
 
-        auto startTime = std::chrono::high_resolution_clock::now();
-        unsigned char tempByte;
+#ifdef _WIN32
+        HANDLE h = (HANDLE)fd;
+#endif
+        auto start = std::chrono::high_resolution_clock::now();
 
-        /* Phase 1: Skip any partial data until we find a newline (sync to line boundary) */
+        /* Temporary read buffer */
+        unsigned char tmp[512];
+
         while (true)
         {
-            auto elapsed = std::chrono::high_resolution_clock::now() - startTime;
+            /* Check remaining time */
+            auto elapsed = std::chrono::high_resolution_clock::now() - start;
             int elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
-            if (elapsedMs >= timeoutMs)
-                return 0;
-
-            fd_set readfds;
-            FD_ZERO(&readfds);
-            FD_SET(fd, &readfds);
-
             int remainingMs = timeoutMs - elapsedMs;
-            struct timeval tv;
-            tv.tv_sec = remainingMs / 1000;
-            tv.tv_usec = (remainingMs % 1000) * 1000;
-
-            int selectResult = select(fd + 1, &readfds, NULL, NULL, &tv);
-            if (selectResult <= 0)
-                return 0;
-
-            ssize_t n = read(fd, &tempByte, 1);
-            if (n <= 0)
-                return 0;
-
-            if (tempByte == '\n')
-                break;
-        }
-
-        /* Phase 2: Read the complete line from start to newline */
-        int bytesRead = 0;
-        while (bytesRead < maxlen - 1)
-        {
-            auto elapsed = std::chrono::high_resolution_clock::now() - startTime;
-            int elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
-            if (elapsedMs >= timeoutMs)
+            if (remainingMs <= 0)
                 break;
 
-            fd_set readfds;
-            FD_ZERO(&readfds);
-            FD_SET(fd, &readfds);
-
-            int remainingMs = timeoutMs - elapsedMs;
-            struct timeval tv;
-            tv.tv_sec = remainingMs / 1000;
-            tv.tv_usec = (remainingMs % 1000) * 1000;
-
-            int selectResult = select(fd + 1, &readfds, NULL, NULL, &tv);
-            if (selectResult <= 0)
-                break;
-
-            ssize_t n = read(fd, buf + bytesRead, 1);
-            if (n <= 0)
-                break;
-
-            /* Stop at newline - complete line received */
-            if (buf[bytesRead] == '\n')
+            /* First, check if we already have a complete message in rxBuffer */
             {
-                buf[bytesRead] = '\0';
-                return bytesRead;
+                std::lock_guard<std::mutex> lock(rxMutex);
+                auto pos = rxBuffer.find(stop_char);
+                if (pos != std::string::npos)
+                {
+                    /* Found a complete message */
+                    size_t copyLen = std::min((size_t)maxlen - 1, pos + 1);
+                    memcpy(buf, rxBuffer.data(), copyLen);
+                    buf[copyLen] = '\0';
+
+                    /* Remove the message from rxBuffer, keep anything after the stop_char */
+                    rxBuffer.erase(0, copyLen);
+                    return (int)copyLen;
+                }
+            }
+#ifdef _WIN32
+            /* Try to read more data from the port */
+            DWORD toRead = 0;
+            COMSTAT status;
+            DWORD errors = 0;
+            if (ClearCommError(h, &errors, &status))
+            {
+                toRead = status.cbInQue;
             }
 
-            bytesRead++;
+            if (toRead == 0)
+            {
+                // No data available, wait a bit and retry
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                continue;
+            }
+
+            DWORD chunk = std::min((DWORD)sizeof(tmp), toRead);
+            DWORD n = 0;
+            if (!ReadFile(h, tmp, chunk, &n, NULL))
+            {
+                DWORD err = GetLastError();
+                if (err == ERROR_IO_PENDING)
+                    continue;
+                WC_ERROR("SerialPort::Read: ReadFile failed (err=%lu)", err);
+                break;
+            }
+#else
+            fd_set readfds;
+            FD_ZERO(&readfds);
+            FD_SET((int)fd, &readfds);
+
+            struct timeval tv;
+            tv.tv_sec = remainingMs / 1000;
+            tv.tv_usec = (remainingMs % 1000) * 1000;
+
+            int selectResult = select((int)fd + 1, &readfds, NULL, NULL, &tv);
+            if (selectResult <= 0)
+                break; /* timeout or error */
+
+            /* Find how many bytes are available to read */
+            int avail = 0;
+            if (ioctl((int)fd, FIONREAD, &avail) < 0)
+            {
+                avail = 0;
+            }
+
+            int toRead = std::min(avail > 0 ? avail : 1, (int)sizeof(tmp));
+            toRead = std::min(toRead, maxlen - 1); /* avoid exceeding caller buffer */
+
+            ssize_t n = ::read((int)fd, tmp, toRead);
+            if (n < 0)
+            {
+                if (errno == EINTR || errno == EAGAIN)
+                    continue;
+                break;
+            }
+#endif
+            if (n == 0)
+                continue;
+
+            /* Append to rxBuffer and check for stop_char */
+            {
+                std::lock_guard<std::mutex> lock(rxMutex);
+                rxBuffer.append((const char *)tmp, n);
+            }
+
+            /* Keep looping until we find stop_char or timeout */
         }
 
-        buf[bytesRead] = '\0';
-        return bytesRead;
+        /* On timeout, return any buffered partial data (if available) */
+        {
+            std::lock_guard<std::mutex> lock(rxMutex);
+            size_t copyLen = std::min((size_t)maxlen - 1, rxBuffer.size());
+            if (copyLen > 0)
+            {
+                memcpy(buf, rxBuffer.data(), copyLen);
+                buf[copyLen] = '\0';
+                rxBuffer.erase(0, copyLen);
+                return (int)copyLen;
+            }
+        }
+
+        buf[0] = '\0';
+        return 0;
+    }
+
+    void SerialPort::Flush()
+    {
+        if (fd != -1)
+        {
+#ifdef _WIN32
+            HANDLE h = (HANDLE)fd;
+            PurgeComm(h, PURGE_RXCLEAR | PURGE_TXCLEAR);
+#else
+            tcflush((int)fd, TCIOFLUSH);
+#endif
+        }
+    }
+
+    void SerialPort::Drain()
+    {
+        if (fd != -1)
+        {
+#ifdef _WIN32
+            HANDLE h = (HANDLE)fd;
+            // Wait briefly; FlushFileBuffers already used after write
+            FlushFileBuffers(h);
+#else
+            tcdrain((int)fd);
+#endif
+        }
     }
 
 } /* namespace WandererCover */

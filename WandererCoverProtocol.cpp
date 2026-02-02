@@ -1,7 +1,7 @@
 /* *******************************************************************************
  * MIT License
  *
- * Copyright (c) 2025 Nico Trost
+ * Copyright (c) 2025-2026 Nico Trost
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -26,9 +26,9 @@
 #include "WandererCoverLogging.h"
 #include <cstring>
 #include <cstdio>
-#include <unistd.h>
-#include <termios.h>
 #include <memory>
+#include <chrono>
+#include <thread>
 
 namespace WandererCover
 {
@@ -43,7 +43,7 @@ namespace WandererCover
         }
 
         // 100 ms delay
-        usleep(100000);
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
         WC_DEBUG("SendCommand: Writing '%s'", command);
         if (!device->port->Write((const unsigned char *)command, strlen(command)))
@@ -55,72 +55,32 @@ namespace WandererCover
         return true;
     }
 
-    bool QueryHandshake(std::shared_ptr<Device> device)
+    /* Message parsing helper functions */
+    static void ParseStatusMessage(std::shared_ptr<Device> device, const char *buffer)
     {
-        if (!device || !device->port)
+        int firmware, heaterPower, brightness, asiairControl;
+        float voltage, closePosition, openPosition, currentPosition;
+        char model[8];
+        if (sscanf(buffer,
+                   "WandererCover%7[^A]A%dA%fA%fA%fA%fA%dA%dA%dA",
+                   model,
+                   &firmware,
+                   &closePosition,
+                   &openPosition,
+                   &currentPosition,
+                   &voltage,
+                   &brightness,
+                   &heaterPower,
+                   &asiairControl) == 9)
         {
-            return false;
-        }
-
-        WC_DEBUG("QueryHandshake: started for device %s", device->portName.c_str());
-
-        if (!device->port->IsOpen())
-        {
-            WC_DEBUG("QueryHandshake: Port not open");
-            return false;
-        }
-
-        // No need to send a request, the cover keeps sending its status
-        char response[32];
-        if (device->port->Read((unsigned char *)response, 32, 3000))
-        {
-            if (strstr(response, "WandererCover") != NULL)
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    bool QueryStatus(std::shared_ptr<Device> device)
-    {
-        if (!device || !device->port)
-        {
-            WC_DEBUG("QueryStatus: invalid device");
-            return false;
-        }
-
-        WC_DEBUG("QueryStatus: started for device %s", device->portName.c_str());
-
-        if (!device->port->IsOpen())
-        {
-            WC_DEBUG("QueryStatus: Port not open");
-            return false;
-        }
-
-        // Read cover status
-        char response[64];
-        if (device->port->Read((unsigned char *)response, 64, 3000))
-        {
-            float voltage;
-            int heaterPower;
-            char model[8];
-            if (sscanf(response,
-                       "WandererCover%7[^A]A%dA%fA%fA%fA%fA%dA%dA%dA",
-                       model,
-                       &device->firmwareVersion,
-                       &device->closePositionAngle,
-                       &device->openPositionAngle,
-                       &device->currentPositionAngle,
-                       &voltage,
-                       &device->brightness,
-                       &heaterPower,
-                       &device->asiairControl) != 9)
-            {
-                WC_DEBUG("QueryStatus: invalid message %s", response);
-                return false;
-            }
+            // Store in device
+            device->modelType = std::string(model);
+            device->firmwareVersion = firmware;
+            device->closePositionAngle = closePosition;
+            device->openPositionAngle = openPosition;
+            device->currentPositionAngle = currentPosition;
+            device->brightness = brightness;
+            device->asiairControl = asiairControl;
 
             // Heater power
             switch (heaterPower)
@@ -139,60 +99,54 @@ namespace WandererCover
                 break;
             }
 
-            device->modelType = std::string(model);
-        }
-        else
-        {
-            WC_DEBUG("QueryStatus: timeout reading model from serial");
-            return false;
+            device->handshakePending = false;
         }
 
-        WC_DEBUG("QueryStatus: Successfully parsed, model=%s", device->modelType.c_str());
-        return true;
+        device->handshakeCV.notify_one();
     }
 
-    /* Background listener thread function for movement completion */
-    static void MoveListenerThreadFunc(std::shared_ptr<Device> device)
+    /* Background listener thread function for status messages */
+    static void StatusListenerThreadFunc(std::shared_ptr<Device> device)
     {
-        if (!device || !device->port)
+        char buffer[256];
+
+        while(device->statusListenerRunning)
         {
-            return;
+            if (!device || !device->port)
+            {
+                WC_DEBUG("StatusListener: Port unavailable, exiting");
+                device->statusListenerRunning = false;
+                return;
+            }
+
+            if (!device->port->IsOpen())
+            {
+                WC_DEBUG("StatusListener: Port not open, exiting");
+                device->statusListenerRunning = false;
+                return;
+            }
+
+            if (device->port->Read((unsigned char *)buffer, 256, '\n', 60000))
+            {
+                /* Parse different message types based on prefix */
+                if (strstr(buffer, "WandererCover") == buffer)
+                {
+                    /* Status message */
+                    ParseStatusMessage(device, buffer);
+
+                    /* Reset moving state, the device only sends data while not moving */
+                    {
+                        std::lock_guard<std::mutex> lock(device->movingStateMutex);
+                        device->isMoving = false;
+                    }
+                }
+            }
         }
 
-        WC_DEBUG("MoveListener: Started for device %s", device->portName.c_str());
-
-        if (!device->port->IsOpen())
-        {
-            WC_DEBUG("MoveListener: Port not open, exiting");
-            device->listenerRunning = false;
-            return;
-        }
-
-        device->movingState = 1;
-        char buffer[8];
-
-        // Read the next incoming line which is "done" with a 60sec timeout
-        if (device->port->Read((unsigned char *)buffer, 8, 60000))
-        {
-            WC_INFO("Returning from cover movement");
-            device->listenerRunning = false;
-            device->movingState = 0;
-
-            // Run a query to get the current angle
-            QueryStatus(device);
-            return;
-        }
-        else
-        {
-            WC_DEBUG("MoveListener: Timeout reading from port");
-            device->listenerRunning = false;
-            // State unknown
-            device->movingState = 2;
-            return;
-        }
+        WC_DEBUG("StatusListener: exiting");
     }
 
-    void StartMoveListener(std::shared_ptr<Device> device)
+    void StartStatusListener(std::shared_ptr<Device> device)
     {
         if (!device)
         {
@@ -200,19 +154,19 @@ namespace WandererCover
         }
 
         /* Stop any existing listener by setting the flag */
-        device->listenerRunning = false;
+        device->statusListenerRunning = false;
 
         /* Small delay to let old thread exit if it's still running */
-        usleep(50000);
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
         /* Start new listener thread */
-        device->listenerRunning = true;
-        std::thread listenerThread(MoveListenerThreadFunc, device);
+        device->statusListenerRunning = true;
+        std::thread listenerThread(StatusListenerThreadFunc, device);
         listenerThread.detach(); /* Detach immediately - let it run independently */
-        WC_DEBUG("StartMoveListener: Listener thread started");
+        WC_DEBUG("StartStatusListener: Listener thread started");
     }
 
-    void StopMoveListener(std::shared_ptr<Device> device)
+    void StopStatusListener(std::shared_ptr<Device> device)
     {
         if (!device)
         {
@@ -220,7 +174,7 @@ namespace WandererCover
         }
 
         /* Signal listener thread to stop */
-        device->listenerRunning = false;
-        WC_DEBUG("StopMoveListener: Listener stop requested");
+        device->statusListenerRunning = false;
+        WC_DEBUG("StopStatusListener: Listener stop requested");
     }
 } /* namespace WandererCover */

@@ -1,7 +1,7 @@
 /* *******************************************************************************
  * MIT License
  *
- * Copyright (c) 2025 Nico Trost
+ * Copyright (c) 2025-2026 Nico Trost
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -25,6 +25,9 @@
 #ifndef WANDERER_COVER_SERIAL_PORT_H
 #define WANDERER_COVER_SERIAL_PORT_H
 
+#include <string>
+#include <mutex>
+
 /* ============================================================================
  * WANDERER COVER SDK - SERIAL PORT MODULE
  *
@@ -33,70 +36,90 @@
 
 namespace WandererCover
 {
-	class SerialPort
-	{
-	private:
-		int fd = -1;
+    class SerialPort
+    {
+    private:
+        intptr_t fd = -1;
+        std::string rxBuffer; /* leftover bytes read from device */
+        std::mutex rxMutex;   /* guards rxBuffer */
+        int maxRetries = 3;   /* number of retries when port is busy */
+        int retryDelayMs = 200; /* delay between retry attempts in milliseconds */
 
-	public:
-		SerialPort() {}
-		~SerialPort() { Close(); }
+    public:
+        SerialPort() {}
+        ~SerialPort() { Close(); }
 
-		/**
-		 * Open a serial port device.
-		 * @param portName Device path (e.g., "/dev/ttyUSB0")
-		 * @return true if successfully opened and configured
-		 */
-		bool Open(const char *portName);
+        /**
+         * Open a serial port device.
+         * 
+         * Implements retry logic for handling busy ports (e.g., when other tools
+         * are scanning the port). Uses exponential backoff between attempts.
+         * 
+         * @param portName Device path (e.g., "/dev/ttyUSB0" or "COM3")
+         * @return true if successfully opened and configured
+         */
+        bool Open(const char *portName);
 
-		/**
-		 * Close the serial port.
-		 */
-		void Close();
+        /**
+         * Set retry parameters for opening the serial port.
+         * @param maxRetries Maximum number of retry attempts (default: 3)
+         * @param retryDelayMs Initial delay between attempts in milliseconds (default: 100)
+         */
+        void SetRetryParams(int maxRetries, int retryDelayMs)
+        {
+            this->maxRetries = maxRetries > 0 ? maxRetries : 1;
+            this->retryDelayMs = retryDelayMs > 0 ? retryDelayMs : 1;
+        }
 
-		/**
-		 * Write data to the serial port.
-		 * @param data Buffer containing data to write
-		 * @param len Number of bytes to write
-		 * @return true if all bytes were successfully written
-		 */
-		bool Write(const unsigned char *data, int len);
+        /**
+         * Close the serial port.
+         */
+        void Close();
 
-		/**
-		 * Read a complete line from the serial port with timeout.
-		 *
-		 * Performs a blocking read that synchronizes to line boundaries and reads exactly
-		 * one complete message terminated by newline. The input buffer is flushed at the start
-		 * to discard any stale data, ensuring fresh responses to commands.
-		 *
-		 * Reading process:
-		 * 1. Flushes input buffer (tcflush TCIFLUSH) to discard stale data
-		 * 2. Synchronizes to line boundary by finding the next \\n
-		 * 3. Reads complete line from start marker through \\n
-		 * 4. Replaces \\n with \\0 for null-terminated string
-		 *
-		 * This approach handles continuous device broadcasts where the buffer may contain
-		 * multiple messages or partial messages.
-		 *
-		 * @param buf Buffer to read data into
-		 * @param maxlen Maximum number of bytes to read (including null terminator)
-		 * @param timeoutMs Timeout in milliseconds
-		 * @return Number of bytes read (0 on timeout or error)
-		 */
-		int Read(unsigned char *buf, int maxlen, int timeoutMs);
+        /**
+         * Write data to the serial port.
+         * @param data Buffer containing data to write
+         * @param len Number of bytes to write
+         * @return true if all bytes were successfully written
+         */
+        bool Write(const unsigned char *data, int len);
 
-		/**
-		 * Check if the serial port is open.
-		 * @return true if port is open
-		 */
-		bool IsOpen() { return fd >= 0; }
+        /**
+         * Read data from the serial port with timeout.
+         *
+         * Uses select() for timeout-based reading on POSIX. Reads byte-by-byte and
+         * stops when stop_char is found.
+         *
+         * @param data Buffer to read data into
+         * @param maxLen Maximum number of bytes to read
+         * @param stop_char Character that terminates a message (e.g. '#')
+         * @param timeoutMs Timeout in milliseconds
+         * @return Number of bytes read (0 on timeout or error)
+         */
+        int Read(unsigned char *buf, int maxlen, char stop_char, int timeoutMs);
 
-		/**
-		 * Get the file descriptor for the serial port.
-		 * @return File descriptor or -1 if closed
-		 */
-		int GetFD() { return fd; }
-	};
+        /**
+         * Flush any pending input/output on the port (cross-platform)
+         */
+        void Flush();
+
+        /**
+         * Ensure transmitted data has been physically sent (drain transmit buffer)
+         */
+        void Drain();
+
+        /**
+         * Check if the serial port is open.
+         * @return true if port is open
+         */
+        bool IsOpen() { return fd != -1; }
+
+        /**
+         * Get the file descriptor for the serial port.
+         * @return File descriptor or -1 if closed
+         */
+        intptr_t GetFD() { return fd; }
+    };
 
 } /* namespace WandererCover */
 

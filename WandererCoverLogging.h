@@ -1,7 +1,7 @@
 /* *******************************************************************************
  * MIT License
  *
- * Copyright (c) 2025 Nico Trost
+ * Copyright (c) 2025-2026 Nico Trost
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -34,11 +34,11 @@
 
 namespace WandererCover
 {
-	/* Compile-time logging configuration */
-	static constexpr bool WC_DEBUG_ENABLED = false; /* Disable debug logging by default */
-	static constexpr bool WC_INFO_ENABLED = false;	/* Enable info logging */
-	static constexpr bool WC_ERROR_ENABLED = true;	/* Enable error logging */
-	static constexpr bool WC_TIMESTAMP_ENABLED = true; /* Enable timestamps in logs */
+    /* Compile-time logging configuration */
+    static constexpr bool WC_DEBUG_ENABLED = false;      /* Disable debug logging by default */
+    static constexpr bool WC_INFO_ENABLED = false;       /* Enable info logging */
+    static constexpr bool WC_ERROR_ENABLED = true;      /* Enable error logging */
+    static constexpr bool WC_TIMESTAMP_ENABLED = true;  /* Enable timestamps in logs */
 
 /* Logging macros - use these throughout the SDK */
 
@@ -48,13 +48,13 @@ namespace WandererCover
  * Controlled by WC_DEBUG_ENABLED compile-time flag.
  */
 #define WC_DEBUG(fmt, ...)                                   \
-	do                                                       \
-	{                                                        \
-		if (WandererCover::WC_DEBUG_ENABLED)               \
-		{                                                    \
-			WandererCover::WRLogDebug(fmt, ##__VA_ARGS__); \
-		}                                                    \
-	} while (0)
+    do                                                       \
+    {                                                        \
+        if (WandererCover::WC_DEBUG_ENABLED)               \
+        {                                                    \
+            WandererCover::WCLogDebug(fmt, ##__VA_ARGS__); \
+        }                                                    \
+    } while (0)
 
 /**
  * Info logging macro.
@@ -62,13 +62,13 @@ namespace WandererCover
  * Controlled by WC_INFO_ENABLED compile-time flag.
  */
 #define WC_INFO(fmt, ...)                                   \
-	do                                                      \
-	{                                                       \
-		if (WandererCover::WC_INFO_ENABLED)               \
-		{                                                   \
-			WandererCover::WRLogInfo(fmt, ##__VA_ARGS__); \
-		}                                                   \
-	} while (0)
+    do                                                      \
+    {                                                       \
+        if (WandererCover::WC_INFO_ENABLED)               \
+        {                                                   \
+            WandererCover::WCLogInfo(fmt, ##__VA_ARGS__); \
+        }                                                   \
+    } while (0)
 
 /**
  * Error logging macro.
@@ -76,42 +76,42 @@ namespace WandererCover
  * Always enabled by default (WC_ERROR_ENABLED = true).
  */
 #define WC_ERROR(fmt, ...)                                   \
-	do                                                       \
-	{                                                        \
-		if (WandererCover::WC_ERROR_ENABLED)               \
-		{                                                    \
-			WandererCover::WRLogError(fmt, ##__VA_ARGS__); \
-		}                                                    \
-	} while (0)
+    do                                                       \
+    {                                                        \
+        if (WandererCover::WC_ERROR_ENABLED)               \
+        {                                                    \
+            WandererCover::WCLogError(fmt, ##__VA_ARGS__); \
+        }                                                    \
+    } while (0)
 
-	/**
-	 * Log a debug message with optional timestamp.
-	 * Only outputs if WC_DEBUG_ENABLED is true.
-	 * Supports printf-style format strings.
-	 */
-	void WRLogDebug(const char *fmt, ...);
+    /**
+     * Log a debug message with optional timestamp.
+     * Only outputs if WC_DEBUG_ENABLED is true.
+     * Supports printf-style format strings.
+     */
+    void WCLogDebug(const char *fmt, ...);
 
-	/**
-	 * Log an info message with optional timestamp.
-	 * Only outputs if WC_INFO_ENABLED is true.
-	 * Supports printf-style format strings.
-	 */
-	void WRLogInfo(const char *fmt, ...);
+    /**
+     * Log an info message with optional timestamp.
+     * Only outputs if WC_INFO_ENABLED is true.
+     * Supports printf-style format strings.
+     */
+    void WCLogInfo(const char *fmt, ...);
 
-	/**
-	 * Log an error message with optional timestamp.
-	 * Enabled by default and should always be called on error conditions.
-	 * Supports printf-style format strings.
-	 */
-	void WRLogError(const char *fmt, ...);
+    /**
+     * Log an error message with optional timestamp.
+     * Enabled by default and should always be called on error conditions.
+     * Supports printf-style format strings.
+     */
+    void WCLogError(const char *fmt, ...);
 
-	/**
-	 * Get current timestamp string for logging.
-	 * Optionally includes in log output if WC_TIMESTAMP_ENABLED is true.
-	 *
-	 * @return Pointer to static timestamp string buffer
-	 */
-	const char *WRGetTimestamp();
+    /**
+     * Get current timestamp string for logging.
+     * Optionally includes in log output if WC_TIMESTAMP_ENABLED is true.
+     *
+     * @return Pointer to static timestamp string buffer
+     */
+    const char *WCGetTimestamp();
 
 } /* namespace WandererCover */
 

@@ -1,7 +1,7 @@
 /* *******************************************************************************
  * MIT License
  *
- * Copyright (c) 2025 Nico Trost
+ * Copyright (c) 2025-2026 Nico Trost
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -29,68 +29,68 @@
 
 namespace WandererCover
 {
-	/* ============================================================================
-	 * LOGGING IMPLEMENTATION
-	 * ============================================================================ */
+    /* ============================================================================
+     * LOGGING IMPLEMENTATION
+     * ============================================================================ */
 
-	const char *WRGetTimestamp()
-	{
-		static char timestamp[20];
-		time_t now = time(nullptr);
-		struct tm *timeinfo = localtime(&now);
-		strftime(timestamp, sizeof(timestamp), "%H:%M:%S", timeinfo);
-		return timestamp;
-	}
+    const char *WCGetTimestamp()
+    {
+        static char timestamp[20];
+        time_t now = time(nullptr);
+        struct tm *timeinfo = localtime(&now);
+        strftime(timestamp, sizeof(timestamp), "%H:%M:%S", timeinfo);
+        return timestamp;
+    }
 
-	void WRLogDebug(const char *fmt, ...)
-	{
-		va_list args;
-		va_start(args, fmt);
-		if (WandererCover::WC_TIMESTAMP_ENABLED)
-		{
-			fprintf(stderr, "[%s] [WC_DEBUG] ", WRGetTimestamp());
-		}
-		else
-		{
-			fprintf(stderr, "[WC_DEBUG] ");
-		}
-		vfprintf(stderr, fmt, args);
-		fprintf(stderr, "\n");
-		va_end(args);
-	}
+    void WCLogDebug(const char *fmt, ...)
+    {
+        va_list args;
+        va_start(args, fmt);
+        if (WandererCover::WC_TIMESTAMP_ENABLED)
+        {
+            fprintf(stderr, "[%s] [WC_DEBUG] ", WCGetTimestamp());
+        }
+        else
+        {
+            fprintf(stderr, "[WC_DEBUG] ");
+        }
+        vfprintf(stderr, fmt, args);
+        fprintf(stderr, "\n");
+        va_end(args);
+    }
 
-	void WRLogInfo(const char *fmt, ...)
-	{
-		va_list args;
-		va_start(args, fmt);
-		if (WandererCover::WC_TIMESTAMP_ENABLED)
-		{
-			fprintf(stderr, "[%s] [WC_INFO] ", WRGetTimestamp());
-		}
-		else
-		{
-			fprintf(stderr, "[WC_INFO] ");
-		}
-		vfprintf(stderr, fmt, args);
-		fprintf(stderr, "\n");
-		va_end(args);
-	}
+    void WCLogInfo(const char *fmt, ...)
+    {
+        va_list args;
+        va_start(args, fmt);
+        if (WandererCover::WC_TIMESTAMP_ENABLED)
+        {
+            fprintf(stderr, "[%s] [WC_INFO] ", WCGetTimestamp());
+        }
+        else
+        {
+            fprintf(stderr, "[WC_INFO] ");
+        }
+        vfprintf(stderr, fmt, args);
+        fprintf(stderr, "\n");
+        va_end(args);
+    }
 
-	void WRLogError(const char *fmt, ...)
-	{
-		va_list args;
-		va_start(args, fmt);
-		if (WandererCover::WC_TIMESTAMP_ENABLED)
-		{
-			fprintf(stderr, "[%s] [WC_ERROR] ", WRGetTimestamp());
-		}
-		else
-		{
-			fprintf(stderr, "[WC_ERROR] ");
-		}
-		vfprintf(stderr, fmt, args);
-		fprintf(stderr, "\n");
-		va_end(args);
-	}
+    void WCLogError(const char *fmt, ...)
+    {
+        va_list args;
+        va_start(args, fmt);
+        if (WandererCover::WC_TIMESTAMP_ENABLED)
+        {
+            fprintf(stderr, "[%s] [WC_ERROR] ", WCGetTimestamp());
+        }
+        else
+        {
+            fprintf(stderr, "[WC_ERROR] ");
+        }
+        vfprintf(stderr, fmt, args);
+        fprintf(stderr, "\n");
+        va_end(args);
+    }
 
 } /* namespace WandererCover */

@@ -1,7 +1,7 @@
 /* *******************************************************************************
  * MIT License
  *
- * Copyright (c) 2025 Nico Trost
+ * Copyright (c) 2025-2026 Nico Trost
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -32,43 +32,49 @@
 #include <mutex>
 #include <thread>
 #include <atomic>
+#include <condition_variable>
 
 namespace WandererCover
 {
-	/**
-	 * Device represents a Wanderer Cover device with its current state.
-	 */
-	struct Device
-	{
-		std::shared_ptr<SerialPort> port;
-		std::string portName;
-		std::string modelType;
-		int firmwareVersion = 0;
-		float closePositionAngle = 0.0f;
-		float openPositionAngle = 0.0f;
-		float currentPositionAngle = 0.0f;
-		int brightness = 0;
-		int heaterPower = 0;
-		int asiairControl = 0;
-		int movingState = 0;
+    /**
+     * Device represents a Wanderer Cover device with its current state.
+     */
+    struct Device
+    {
+        std::shared_ptr<SerialPort> port;
+        std::string portName;
+        std::string modelType;
+        int firmwareVersion = 0;
+        float closePositionAngle = 0.0f;
+        float openPositionAngle = 0.0f;
+        float currentPositionAngle = 0.0f;
+        int brightness = 0;
+        int heaterPower = 0;
+        int asiairControl = 0;
+        int movingState = 0;
+        bool isMoving = false;
+        /* Config mutexes etc */
+        std::mutex handshakeMutex;
+        std::mutex movingStateMutex; /* Protects isMoving from race conditions */
+        std::condition_variable handshakeCV;
+        std::atomic<bool> handshakePending{false};
 
-		/* Listener thread state - don't store thread, just the flag */
-		std::atomic<bool> listenerRunning{false};
-		std::mutex listenerMutex;
+        /* Listener thread state - don't store thread, just the flag */
+        std::atomic<bool> statusListenerRunning{false};
 
-		/* Simple destructor - nothing to clean up */
-		~Device() = default;
-	};
+        /* Simple destructor - nothing to clean up */
+        ~Device() = default;
+    };
 
-	/**
-	 * Global device registry mapping device IDs to Device objects.
-	 */
-	extern std::map<int, std::shared_ptr<Device>> g_devices;
+    /**
+     * Global device registry mapping device IDs to Device objects.
+     */
+    extern std::map<int, std::shared_ptr<Device>> g_devices;
 
-	/**
-	 * Global mutex protecting access to g_devices.
-	 */
-	extern std::mutex g_globalMutex;
+    /**
+     * Global mutex protecting access to g_devices.
+     */
+    extern std::mutex g_globalMutex;
 
 } /* namespace WandererCover */
 

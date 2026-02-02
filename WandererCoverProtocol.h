@@ -1,7 +1,7 @@
 /* *******************************************************************************
  * MIT License
  *
- * Copyright (c) 2025 Nico Trost
+ * Copyright (c) 2025-2026 Nico Trost
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -44,40 +44,13 @@ namespace WandererCover
     bool SendCommand(std::shared_ptr<Device> device, const char *command, int timeoutMs = 3000);
 
     /**
-     * Read and parse device status message.
-     *
-     * Reads a status message from the serial port and updates the device state with
-     * current values: firmware version, position angles, brightness, heater power, etc.
-     * The device continuously broadcasts status messages, so this always gets fresh data.
-     *
-     * Device broadcasts in format:
-     * WandererCover[model]A[firmware]A[closePos]A[openPos]A[currentPos]A[voltage]A[brightness]A[heater]A[asiair]A
-     *
-     * @param device Device to query status from
-     * @return true if status was successfully read and parsed
-     */
-    bool QueryStatus(std::shared_ptr<Device> device);
-
-    /**
-     * Verify device connection with handshake.
-     *
-     * Attempts to read a device status message to confirm the device is present and
-     * responding. Used during device open to validate the serial connection before
-     * adding the device to the registry.
-     *
-     * @param device Device to verify
-     * @return true if device responds with a valid WandererCover message
-     */
-    bool QueryHandshake(std::shared_ptr<Device> device);
-
-    /**
      * Start listening for movement completion messages.
      * Spawns a background thread that reads serial data until movement finishes.
      * Should be called before triggering a move command.
      *
      * @param device Device to listen on
      */
-    void StartMoveListener(std::shared_ptr<Device> device);
+    void StartStatusListener(std::shared_ptr<Device> device);
 
     /**
      * Stop listening for movement completion messages.
@@ -86,7 +59,7 @@ namespace WandererCover
      *
      * @param device Device to stop listening on
      */
-    void StopMoveListener(std::shared_ptr<Device> device);
+    void StopStatusListener(std::shared_ptr<Device> device);
 
 } /* namespace WandererCover */
 
