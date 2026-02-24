@@ -433,7 +433,7 @@ WCAPI WC_ERROR_TYPE WCCoverSetConfig(int id, WC_COVER_CONFIG *config)
 
     if (config->mask & MASK_COVER_HEATER_POWER)
     {
-        if (config->heaterPower < 0 || config->heaterPower > 4)
+        if (config->heaterPower < 0 || config->heaterPower > 3)
         {
             return WC_ERROR_INVALID_PARAMETER;
         }
