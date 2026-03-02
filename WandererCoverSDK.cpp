@@ -47,7 +47,7 @@
 #include <dirent.h>
 #include <libudev.h>
 
-#define SDK_VERSION "1.2.0"
+#define SDK_VERSION "1.3.0"
 
 /* Import internal implementation for use in public C API */
 using namespace WandererCover;
@@ -93,6 +93,67 @@ static bool SendAndWaitForReply(std::shared_ptr<WandererCover::Device> device,
     return true;
 }
 
+/* Structure for parallel device scanning */
+struct ScanWorkerTask
+{
+    std::string portName;
+    std::shared_ptr<WandererCover::Device> device;
+    bool isValid;
+    
+    ScanWorkerTask(const char *port) : portName(port), isValid(false) {}
+};
+
+/* Worker thread function for testing a single device */
+static void ScanWorkerThread(ScanWorkerTask &task)
+{
+    auto port = std::make_shared<SerialPort>();
+    
+    /* Use minimal retry for scanning - fail fast if port is busy */
+    /* This prevents hanging when other apps are also scanning */
+    port->SetRetryParams(1, 10);  /* 1 retry, 10ms delay = ~10ms total wait */
+    
+    if (!port->Open(task.portName.c_str()))
+    {
+        WC_DEBUG("ScanWorkerThread: Failed to open port %s (skipped, may be in use by another app)", task.portName.c_str());
+        return;
+    }
+
+    auto tempDevice = std::make_shared<Device>();
+    tempDevice->port = port;
+    tempDevice->portName = task.portName;
+
+    // Send dummy command to wake up device
+    SendCommand(tempDevice, "\n");
+
+    // Start status listener thread
+    StartStatusListener(tempDevice);
+
+    // Perform handshake (just wait for response, no command)
+    if(SendAndWaitForReply(tempDevice,
+                           nullptr,
+                           tempDevice->handshakeMutex,
+                           tempDevice->handshakeCV,
+                           tempDevice->handshakePending,
+                           "handshake"))
+    {
+        WC_DEBUG("ScanWorkerThread: Valid device found on %s", task.portName.c_str());
+
+        /* Stop listener */
+        StopStatusListener(tempDevice);
+
+        /* Valid device found - close port, will be reopened in WCOpen */
+        port->Close();
+        
+        task.device = tempDevice;
+        task.isValid = true;
+    }
+    else
+    {
+        WC_DEBUG("ScanWorkerThread: No response from device on %s", task.portName.c_str());
+        /* Not a valid Wanderer device, close port */
+        port->Close();
+    }
+}
 
 /* ============================================================================
  * PUBLIC SDK API IMPLEMENTATION
@@ -143,14 +204,10 @@ WCAPI WC_ERROR_TYPE WCCoverScan(int *number, int *ids)
     struct udev_list_entry *devices = udev_enumerate_get_list_entry(enumerate);
     struct udev_list_entry *entry;
 
-    char response[64];
-
-    /* Iterate through all tty devices */
+    /* Step 1: Collect all candidate CH340 devices */
+    std::vector<std::string> candidatePorts;
     udev_list_entry_foreach(entry, devices)
     {
-        if (count >= WC_MAX_NUM)
-            break;
-
         const char *path = udev_list_entry_get_name(entry);
         struct udev_device *device = udev_device_new_from_syspath(udev, path);
         if (!device)
@@ -178,8 +235,6 @@ WCAPI WC_ERROR_TYPE WCCoverScan(int *number, int *ids)
             continue;
         }
 
-        WC_DEBUG("Found device with VID:%s PID:%s", vid, pid);
-
         if (strcmp(vid, "1a86") != 0 || strcmp(pid, "7523") != 0)
         {
             udev_device_unref(device);
@@ -188,62 +243,53 @@ WCAPI WC_ERROR_TYPE WCCoverScan(int *number, int *ids)
 
         /* Get the device node (e.g., /dev/ttyUSB0) */
         const char *deviceNode = udev_device_get_devnode(device);
-        if (!deviceNode)
+        if (deviceNode)
         {
-            udev_device_unref(device);
-            continue;
-        }
-
-        WC_DEBUG("Trying to open device: %s", deviceNode);
-
-        /* Try to open the port */
-        auto port = std::make_shared<SerialPort>();
-        if (port->Open(deviceNode))
-        {
-            WC_DEBUG("Port opened, flushing and sending command...");
-
-            auto tempDevice = std::make_shared<Device>();
-            tempDevice->port = port;
-            tempDevice->portName = deviceNode;
-
-            // Send dummy command to wake up device
-            SendCommand(tempDevice, "\n");
-
-            // Start status listener thread
-            StartStatusListener(tempDevice);
-
-            if(SendAndWaitForReply(tempDevice,
-                                   nullptr,
-                                   tempDevice->handshakeMutex,
-                                   tempDevice->handshakeCV,
-                                   tempDevice->handshakePending,
-                                   "handshake"))
-            {
-                WC_DEBUG("Valid device found!");
-
-                /* Stop listener */
-                StopStatusListener(tempDevice);
-
-                /* Valid device found - close port, will be reopened in WDOpen */
-                port->Close();
-                int id = count;
-                g_devices[id] = tempDevice;
-                ids[count] = id;
-                count++;
-            }
-            else
-            {
-                WC_DEBUG("No response from device");
-                /* Not a valid Wanderer device, close port */
-                port->Close();
-            }
-        }
-        else
-        {
-            WC_DEBUG("Failed to open port %s", deviceNode);
+            WC_DEBUG("Found CH340 device: %s", deviceNode);
+            candidatePorts.push_back(std::string(deviceNode));
         }
 
         udev_device_unref(device);
+    }
+
+    /* Step 2: Scan candidate devices in parallel */
+    std::vector<ScanWorkerTask> tasks;
+    std::vector<std::thread> workerThreads;
+
+    for (const auto &port : candidatePorts)
+    {
+        if (count >= WC_MAX_NUM)
+            break;
+        tasks.emplace_back(port.c_str());
+        count++;
+    }
+
+    /* Spawn worker threads for each candidate port */
+    for (auto &task : tasks)
+    {
+        workerThreads.emplace_back(ScanWorkerThread, std::ref(task));
+    }
+
+    /* Wait for all threads to complete */
+    for (auto &thread : workerThreads)
+    {
+        if (thread.joinable())
+        {
+            thread.join();
+        }
+    }
+
+    /* Step 3: Collect valid devices */
+    count = 0;
+    for (auto &task : tasks)
+    {
+        if (task.isValid && count < WC_MAX_NUM)
+        {
+            int id = count;
+            g_devices[id] = task.device;
+            ids[count] = id;
+            count++;
+        }
     }
 
     /* Clean up udev resources */
@@ -274,6 +320,9 @@ WCAPI WC_ERROR_TYPE WCCoverOpen(int id)
     {
         WC_DEBUG("WCCoverOpen: Creating new SerialPort instance");
         device->port = std::make_shared<SerialPort>();
+        /* Use standard retry parameters for normal device open (more tolerant than scan) */
+        /* Default: 3 retries with 200ms delay = ~600ms max wait time */
+        device->port->SetRetryParams(3, 200);
     }
 
     WC_DEBUG("WCCoverOpen: Attempting to open port %s", device->portName.c_str());
