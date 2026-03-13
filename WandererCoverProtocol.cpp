@@ -56,7 +56,7 @@ namespace WandererCover
     }
 
     /* Message parsing helper functions */
-    static void ParseStatusMessage(std::shared_ptr<Device> device, const char *buffer)
+    static void ParseStatusMessage(Device* device, const char *buffer)
     {
         int firmware, heaterPower, brightness, asiairControl;
         float voltage, closePosition, openPosition, currentPosition;
@@ -106,13 +106,13 @@ namespace WandererCover
     }
 
     /* Background listener thread function for status messages */
-    static void StatusListenerThreadFunc(std::shared_ptr<Device> device)
+    static void StatusListenerThreadFunc(Device* device)
     {
         char buffer[256];
 
         while(device->statusListenerRunning)
         {
-            if (!device || !device->port)
+            if (!device->port)
             {
                 WC_DEBUG("StatusListener: Port unavailable, exiting");
                 device->statusListenerRunning = false;
@@ -126,7 +126,7 @@ namespace WandererCover
                 return;
             }
 
-            if (device->port->Read((unsigned char *)buffer, 256, '\n', 60000))
+            if (device->port->Read((unsigned char *)buffer, 256, '\n', 5000))
             {
                 /* Parse different message types based on prefix */
                 if (strstr(buffer, "WandererCover") == buffer)
@@ -153,16 +153,14 @@ namespace WandererCover
             return;
         }
 
-        /* Stop any existing listener by setting the flag */
+        /* Stop any existing listener and join it before starting a new one */
         device->statusListenerRunning = false;
-
-        /* Small delay to let old thread exit if it's still running */
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        if (device->statusListenerThread.joinable())
+            device->statusListenerThread.join();
 
         /* Start new listener thread */
         device->statusListenerRunning = true;
-        std::thread listenerThread(StatusListenerThreadFunc, device);
-        listenerThread.detach(); /* Detach immediately - let it run independently */
+        device->statusListenerThread = std::thread(StatusListenerThreadFunc, device.get());
         WC_DEBUG("StartStatusListener: Listener thread started");
     }
 
@@ -173,8 +171,10 @@ namespace WandererCover
             return;
         }
 
-        /* Signal listener thread to stop */
+        /* Signal listener thread to stop and join it */
         device->statusListenerRunning = false;
-        WC_DEBUG("StopStatusListener: Listener stop requested");
+        if (device->statusListenerThread.joinable())
+            device->statusListenerThread.join();
+        WC_DEBUG("StopStatusListener: Listener stopped");
     }
 } /* namespace WandererCover */

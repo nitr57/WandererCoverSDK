@@ -59,11 +59,16 @@ namespace WandererCover
         std::condition_variable handshakeCV;
         std::atomic<bool> handshakePending{false};
 
-        /* Listener thread state - don't store thread, just the flag */
+        /* Listener thread state */
         std::atomic<bool> statusListenerRunning{false};
+        std::thread statusListenerThread;
 
-        /* Simple destructor - nothing to clean up */
-        ~Device() = default;
+        ~Device()
+        {
+            statusListenerRunning = false;
+            if (statusListenerThread.joinable())
+                statusListenerThread.join();
+        }
     };
 
     /**

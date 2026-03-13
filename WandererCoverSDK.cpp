@@ -150,7 +150,8 @@ static void ScanWorkerThread(ScanWorkerTask &task)
     else
     {
         WC_DEBUG("ScanWorkerThread: No response from device on %s", task.portName.c_str());
-        /* Not a valid Wanderer device, close port */
+        /* Not a valid Wanderer device, stop listener and close port */
+        StopStatusListener(tempDevice);
         port->Close();
     }
 }
@@ -344,6 +345,7 @@ WCAPI WC_ERROR_TYPE WCCoverOpen(int id)
                             device->handshakePending, "handshake"))
     {
         WC_ERROR("WDCoverOpen: Handshake failed");
+        StopStatusListener(device);
         device->port->Close();
         return WC_ERROR_COMMUNICATION;
     }
@@ -364,6 +366,7 @@ WCAPI WC_ERROR_TYPE WCCoverClose(int id)
 
     auto device = it->second;
 
+    StopStatusListener(device);
     if (device->port)
     {
         device->port->Close();
