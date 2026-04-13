@@ -58,20 +58,40 @@ namespace WandererCover
     /* Message parsing helper functions */
     static void ParseStatusMessage(Device* device, const char *buffer)
     {
-        int firmware, heaterPower, brightness, asiairControl;
+        int firmware, heaterPower, brightness, asiairControl = 0;
         float voltage, closePosition, openPosition, currentPosition;
         char model[8];
-        if (sscanf(buffer,
-                   "WandererCover%7[^A]A%dA%fA%fA%fA%fA%dA%dA%dA",
-                   model,
-                   &firmware,
-                   &closePosition,
-                   &openPosition,
-                   &currentPosition,
-                   &voltage,
-                   &brightness,
-                   &heaterPower,
-                   &asiairControl) == 9)
+        
+        // Try parsing with asiairControl field (newer firmware)
+        int parsed = sscanf(buffer,
+                            "WandererCover%7[^A]A%dA%fA%fA%fA%fA%dA%dA%dA",
+                            model,
+                            &firmware,
+                            &closePosition,
+                            &openPosition,
+                            &currentPosition,
+                            &voltage,
+                            &brightness,
+                            &heaterPower,
+                            &asiairControl);
+        
+        // If that fails, try parsing without asiairControl field (older firmware)
+        if (parsed != 9)
+        {
+            asiairControl = 0;  // Default value for older firmware
+            parsed = sscanf(buffer,
+                            "WandererCover%7[^A]A%dA%fA%fA%fA%fA%dA%dA",
+                            model,
+                            &firmware,
+                            &closePosition,
+                            &openPosition,
+                            &currentPosition,
+                            &voltage,
+                            &brightness,
+                            &heaterPower);
+        }
+        
+        if (parsed >= 8)
         {
             // Store in device
             device->modelType = std::string(model);
