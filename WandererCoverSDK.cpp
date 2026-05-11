@@ -110,7 +110,10 @@ static void ScanWorkerThread(ScanWorkerTask &task)
     
     /* Use minimal retry for scanning - fail fast if port is busy */
     /* This prevents hanging when other apps are also scanning */
-    port->SetRetryParams(1, 10);  /* 1 retry, 10ms delay = ~10ms total wait */
+    /* Allow up to ~3 seconds for a competing SDK scan to release the port.
+     * Workers run in parallel so this does not multiply scan duration —
+     * total scan time = max(all worker times), not sum. */
+    port->SetRetryParams(60, 50);  /* 60 * 50ms = 3000ms total timeout, 50ms poll interval */
     
     if (!port->Open(task.portName.c_str()))
     {
@@ -323,7 +326,10 @@ WCAPI WC_ERROR_TYPE WCCoverOpen(int id)
         device->port = std::make_shared<SerialPort>();
         /* Use standard retry parameters for normal device open (more tolerant than scan) */
         /* Default: 3 retries with 200ms delay = ~600ms max wait time */
-        device->port->SetRetryParams(3, 200);
+        /* Use aggressive retry parameters for normal device open.
+         * More tolerant than scan to handle other SDKs scanning concurrently.
+         * 10 retries with 300ms delay + polling = ~3 seconds total wait */
+        device->port->SetRetryParams(10, 300);
     }
 
     WC_DEBUG("WCCoverOpen: Attempting to open port %s", device->portName.c_str());
