@@ -44,6 +44,7 @@ namespace WandererCover
         std::shared_ptr<SerialPort> port;
         std::string portName;
         std::string modelType;
+        std::atomic<bool> isOpen{false}; /* Kept atomic for consistency with the other SDKs' Device structs */
         int firmwareVersion = 0;
         float closePositionAngle = 0.0f;
         float openPositionAngle = 0.0f;

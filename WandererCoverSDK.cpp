@@ -47,7 +47,7 @@
 #include <dirent.h>
 #include <libudev.h>
 
-#define SDK_VERSION "1.3.5"
+#define SDK_VERSION "1.4.0"
 
 /* Import internal implementation for use in public C API */
 using namespace WandererCover;
@@ -188,6 +188,18 @@ WCAPI WC_ERROR_TYPE WCCoverScan(int *number, int *ids)
 
     int count = 0;
 
+    /* Build a set of already-registered port names so a rescan neither re-probes
+     * a port that is already open (which would just fail/hang) nor assigns it a
+     * new id that could collide with and silently replace the live device. */
+    std::map<std::string, int> connectedPorts;
+    for (const auto &pair : g_devices)
+    {
+        if (!pair.second->portName.empty())
+        {
+            connectedPorts[pair.second->portName] = pair.first;
+        }
+    }
+
     /* Create udev context */
     struct udev *udev = udev_new();
     if (!udev)
@@ -258,16 +270,18 @@ WCAPI WC_ERROR_TYPE WCCoverScan(int *number, int *ids)
         udev_device_unref(device);
     }
 
-    /* Step 2: Scan candidate devices in parallel */
+    /* Step 2: Scan candidate devices in parallel, skipping ports that already
+     * belong to a registered device. */
     std::vector<ScanWorkerTask> tasks;
     std::vector<std::thread> workerThreads;
 
     for (const auto &port : candidatePorts)
     {
-        if (count >= WC_MAX_NUM)
+        if (connectedPorts.find(port) != connectedPorts.end())
+            continue;
+        if ((int)tasks.size() >= WC_MAX_NUM)
             break;
         tasks.emplace_back(port.c_str());
-        count++;
     }
 
     /* Spawn worker threads for each candidate port */
@@ -285,13 +299,25 @@ WCAPI WC_ERROR_TYPE WCCoverScan(int *number, int *ids)
         }
     }
 
-    /* Step 3: Collect valid devices */
-    count = 0;
+    /* Step 3: Report already-connected devices under their existing id, and
+     * assign newly found devices the smallest id not currently in use so they
+     * never collide with (and replace) an already-registered device. */
+    for (const auto &pair : connectedPorts)
+    {
+        if (count >= WC_MAX_NUM)
+            break;
+        ids[count] = pair.second;
+        count++;
+    }
+
     for (auto &task : tasks)
     {
         if (task.isValid && count < WC_MAX_NUM)
         {
-            int id = count;
+            int id = 0;
+            while (g_devices.find(id) != g_devices.end())
+                id++;
+
             g_devices[id] = task.device;
             ids[count] = id;
             count++;
@@ -320,6 +346,12 @@ WCAPI WC_ERROR_TYPE WCCoverOpen(int id)
 
     auto device = it->second;
     WC_DEBUG("WCCoverOpen: Found device, portName=%s", device->portName.c_str());
+
+    if (device->isOpen)
+    {
+        WC_DEBUG("WCCoverOpen: Device already open");
+        return WC_SUCCESS;
+    }
 
     /* Create a new SerialPort instance if needed */
     if (!device->port)
@@ -358,6 +390,8 @@ WCAPI WC_ERROR_TYPE WCCoverOpen(int id)
         return WC_ERROR_COMMUNICATION;
     }
 
+    device->isOpen = true;
+
     WC_INFO("[OK] Device opened");
     return WC_SUCCESS;
 }
@@ -379,6 +413,8 @@ WCAPI WC_ERROR_TYPE WCCoverClose(int id)
     {
         device->port->Close();
     }
+
+    device->isOpen = false;
 
     WC_INFO("[OK] Device closed");
     return WC_SUCCESS;
