@@ -31,7 +31,11 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <termios.h>
-#include <sys/select.h>
+#include <poll.h>
+#include <climits>
+#include <cstdlib>
+#include <string>
+#include <sys/file.h>
 #include <sys/ioctl.h>
 #endif
 #include <cerrno>
@@ -62,9 +66,39 @@ namespace WandererCover
     }
 #endif
 
+#ifndef _WIN32
+    /* Path of the in-use marker for a port: /tmp/ch34x-<port name>.lock, named
+     * after the real device node so a symlink (/dev/serial/by-id/...) maps to
+     * the same marker */
+    static std::string InUseMarkerPath(const char *portName)
+    {
+        char resolved[PATH_MAX];
+        const char *path = realpath(portName, resolved) ? resolved : portName;
+        const char *name = strrchr(path, '/');
+        return std::string("/tmp/ch34x-") + (name ? name + 1 : path) + ".lock";
+    }
+
+    /* True if another process holds the port's in-use marker, i.e. the port is
+     * open for use rather than just being probed by a scan */
+    static bool IsMarkedInUse(const char *portName)
+    {
+        int lockFd = open(InUseMarkerPath(portName).c_str(), O_RDONLY | O_CLOEXEC);
+        if (lockFd < 0)
+        {
+            return false;
+        }
+        bool held = flock(lockFd, LOCK_SH | LOCK_NB) != 0 && errno == EWOULDBLOCK;
+        close(lockFd);
+        return held;
+    }
+#endif
+
     bool SerialPort::Open(const char *portName)
     {
         WC_DEBUG("SerialPort::Open: Attempting to open %s", portName);
+
+        /* Never leak a previously opened descriptor */
+        Close();
 #ifdef _WIN32
         std::string device = ToDevicePath(portName);
 
@@ -127,7 +161,11 @@ namespace WandererCover
         /* Try to open with polling retry logic for busy ports.
          * There is no kernel mechanism to wait for TIOCEXCL release, so we
          * poll at a short fixed interval until the port becomes available or
-         * we exceed the total timeout budget. */
+         * we exceed the total timeout budget.
+         *
+         * O_NONBLOCK: without it, open() waits for carrier detect forever if a
+         * previous user left CLOCAL cleared on the tty. It is removed again once
+         * the port is configured. */
         int open_fd = -1;
         int attempt = 0;
         int totalWaitMs = 0;
@@ -136,15 +174,45 @@ namespace WandererCover
 
         while (open_fd < 0 && totalWaitMs < totalTimeoutMs)
         {
-            open_fd = open(portName, O_RDWR | O_NOCTTY);
+            open_fd = open(portName, O_RDWR | O_NOCTTY | O_CLOEXEC | O_NONBLOCK);
             WC_DEBUG("SerialPort::Open: Attempt %d, open() returned fd=%d, elapsed=%dms",
                      attempt + 1, open_fd, totalWaitMs);
+
+            /* Also honour advisory locks, as taken e.g. by pyserial's
+             * exclusive mode, so a port in use by another program is treated
+             * as busy rather than probed. */
+            if (open_fd >= 0 && flock(open_fd, LOCK_EX | LOCK_NB) != 0)
+            {
+                int lockErrno = errno;
+                close(open_fd);
+                open_fd = -1;
+                errno = lockErrno == EWOULDBLOCK ? EBUSY : lockErrno;
+            }
 
             if (open_fd < 0)
             {
                 int last_errno = errno;
+                /* EACCES is usually permanent (user not in the "dialout" group), but
+                 * right after the device is plugged in udev may not have applied its
+                 * permissions yet, so give it a short grace period only. */
+                const int permissionGraceMs = 1000;
+                if (last_errno == EACCES && totalWaitMs >= permissionGraceMs)
+                {
+                    WC_ERROR("SerialPort::Open: Permission denied opening %s - "
+                             "is the user in the 'dialout' group?", portName);
+                    return false;
+                }
+
+                /* A busy port that is open for use will not become free soon -
+                 * only wait for ports that are busy because they are being probed */
+                if (last_errno == EBUSY && IsMarkedInUse(portName))
+                {
+                    WC_DEBUG("SerialPort::Open: %s is in use by another program, skipping", portName);
+                    return false;
+                }
+
                 /* EBUSY: port held exclusively by another process (TIOCEXCL)
-                 * EAGAIN/EACCES: temporarily unavailable - all worth waiting for */
+                 * EAGAIN/EACCES: temporarily unavailable - worth waiting for */
                 if (last_errno == EBUSY || last_errno == EAGAIN || last_errno == EACCES)
                 {
                     WC_DEBUG("SerialPort::Open: Port busy (errno=%d), polling in %dms (elapsed=%dms, timeout=%dms)...",
@@ -188,6 +256,8 @@ namespace WandererCover
             fd = -1;
             return false;
         }
+        originalSettings = tty;
+        haveOriginalSettings = true;
 
         /* Set 19200 baud rate */
         cfsetispeed(&tty, B19200);
@@ -269,14 +339,21 @@ namespace WandererCover
         }
         WC_DEBUG("SerialPort::Open: tcsetattr succeeded");
 
-        tcflush(fd, TCIOFLUSH);
+        /* Back to blocking writes now that CLOCAL is set */
+        int flags = fcntl(open_fd, F_GETFL);
+        if (flags >= 0)
+        {
+            fcntl(open_fd, F_SETFL, flags & ~O_NONBLOCK);
+        }
+
+        tcflush((int)fd, TCIOFLUSH);
 
         /* Allow the USB-serial adapter and MCU to settle after port open.
          * CH340-based devices may trigger a microcontroller reset on the first
          * open after a fresh USB plug-in. The bootloader typically needs
          * ~200-500ms before the application firmware starts responding. */
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
-        tcflush(fd, TCIOFLUSH);
+        tcflush((int)fd, TCIOFLUSH);
 
         WC_DEBUG("SerialPort::Open: Successfully opened %s (fd=%d)", portName, (int)fd);
 #endif
@@ -285,16 +362,27 @@ namespace WandererCover
 
     void SerialPort::Close()
     {
-        if (fd != -1)
+        intptr_t oldFd = fd.exchange(-1);
+        if (oldFd != -1)
         {
 #ifdef _WIN32
-            HANDLE h = (HANDLE)fd;
-            CloseHandle(h);
+            CloseHandle((HANDLE)oldFd);
 #else
-            close((int)fd);
+            /* TIOCEXCL belongs to the tty, not to this descriptor: clear it so it
+             * doesn't outlive us if another program also has the port open */
+            ioctl((int)oldFd, TIOCNXCL);
+            close((int)oldFd);
+            haveOriginalSettings = false;
 #endif
-            fd = -1;
         }
+
+#ifndef _WIN32
+        if (inUseLockFd != -1)
+        {
+            close(inUseLockFd);
+            inUseLockFd = -1;
+        }
+#endif
 
         /* Clear the receive buffer when port is closed to prevent stale data from
            affecting subsequent reads if the same port is reopened */
@@ -302,6 +390,60 @@ namespace WandererCover
             std::lock_guard<std::mutex> lock(rxMutex);
             rxBuffer.clear();
         }
+    }
+
+    void SerialPort::MarkInUse(const char *portName)
+    {
+#ifndef _WIN32
+        if (fd == -1 || inUseLockFd != -1)
+        {
+            return;
+        }
+
+        /* Readable by everyone: other users' scans only need to test the lock */
+        std::string path = InUseMarkerPath(portName);
+        int lockFd = open(path.c_str(), O_RDONLY | O_CREAT | O_CLOEXEC, 0644);
+        if (lockFd < 0)
+        {
+            WC_DEBUG("SerialPort::MarkInUse: cannot create %s (errno=%d)", path.c_str(), errno);
+            return;
+        }
+        if (flock(lockFd, LOCK_EX | LOCK_NB) != 0)
+        {
+            WC_DEBUG("SerialPort::MarkInUse: %s already locked (errno=%d)", path.c_str(), errno);
+            close(lockFd);
+            return;
+        }
+        inUseLockFd = lockFd;
+#else
+        (void)portName;
+#endif
+    }
+
+    void SerialPort::RestoreOriginalSettings()
+    {
+#ifndef _WIN32
+        if (fd != -1 && haveOriginalSettings)
+        {
+            struct termios settings = originalSettings;
+            settings.c_cflag &= ~HUPCL;
+            tcsetattr((int)fd, TCSANOW, &settings);
+        }
+#endif
+    }
+
+    bool SerialPort::IsHungUp()
+    {
+        if (fd == -1)
+        {
+            return false;
+        }
+#ifdef _WIN32
+        return false;
+#else
+        struct pollfd pfd = {(int)fd, 0, 0};
+        return poll(&pfd, 1, 0) > 0 && (pfd.revents & (POLLHUP | POLLERR | POLLNVAL));
+#endif
     }
 
     bool SerialPort::Write(const unsigned char *data, int len)
@@ -312,7 +454,7 @@ namespace WandererCover
         }
 
 #ifdef _WIN32
-        HANDLE h = (HANDLE)fd;
+        HANDLE h = (HANDLE)(intptr_t)fd;
         DWORD written = 0;
         if (!WriteFile(h, data, (DWORD)len, &written, NULL))
         {
@@ -320,8 +462,24 @@ namespace WandererCover
             return false;
         }
 #else
-        int written = write((int)fd, data, len);
-        WC_DEBUG("Write: fd=%d, wrote %d/%d bytes (%s)", (int)fd, written, len, data);
+        int written = 0;
+        while (written < len)
+        {
+            ssize_t n = write((int)fd, data + written, len - written);
+            if (n < 0)
+            {
+                if (errno == EINTR)
+                    continue;
+                WC_DEBUG("Write: fd=%d, write failed (errno=%d)", (int)fd, errno);
+                break;
+            }
+            if (n == 0)
+            {
+                break;
+            }
+            written += (int)n;
+        }
+        WC_DEBUG("Write: fd=%d, wrote %d/%d bytes", (int)fd, written, len);
 #endif
 
         /* Wait for all data to be sent */
@@ -331,13 +489,31 @@ namespace WandererCover
 
     int SerialPort::Read(unsigned char *buf, int maxlen, char stop_char, int timeoutMs)
     {
+        return ReadImpl(buf, maxlen, stop_char, timeoutMs, true, nullptr);
+    }
+
+    int SerialPort::ReadMessage(unsigned char *buf, int maxlen, char stop_char, int timeoutMs, bool &ioError)
+    {
+        ioError = false;
+        return ReadImpl(buf, maxlen, stop_char, timeoutMs, false, &ioError);
+    }
+
+    int SerialPort::ReadImpl(unsigned char *buf, int maxlen, char stop_char, int timeoutMs,
+                             bool returnPartial, bool *ioError)
+    {
+        if (maxlen >= 1)
+            buf[0] = '\0';
         if (fd == -1 || maxlen <= 1)
+        {
+            if (ioError && fd == -1)
+                *ioError = true;
             return 0;
+        }
 
 #ifdef _WIN32
-        HANDLE h = (HANDLE)fd;
+        HANDLE h = (HANDLE)(intptr_t)fd;
 #endif
-        auto start = std::chrono::high_resolution_clock::now();
+        auto start = std::chrono::steady_clock::now();
 
         /* Temporary read buffer */
         unsigned char tmp[512];
@@ -345,7 +521,7 @@ namespace WandererCover
         while (true)
         {
             /* Check remaining time */
-            auto elapsed = std::chrono::high_resolution_clock::now() - start;
+            auto elapsed = std::chrono::steady_clock::now() - start;
             int elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
             int remainingMs = timeoutMs - elapsedMs;
             if (remainingMs <= 0)
@@ -395,17 +571,29 @@ namespace WandererCover
                 break;
             }
 #else
-            fd_set readfds;
-            FD_ZERO(&readfds);
-            FD_SET((int)fd, &readfds);
+            struct pollfd pfd = {(int)fd, POLLIN, 0};
+            int pollResult = poll(&pfd, 1, remainingMs);
+            if (pollResult < 0 && errno == EINTR)
+                continue; /* interrupted by a signal - recompute remaining time and retry */
+            if (pollResult < 0)
+            {
+                if (ioError)
+                    *ioError = true;
+                break;
+            }
+            if (pollResult == 0)
+                break; /* timeout */
 
-            struct timeval tv;
-            tv.tv_sec = remainingMs / 1000;
-            tv.tv_usec = (remainingMs % 1000) * 1000;
-
-            int selectResult = select((int)fd + 1, &readfds, NULL, NULL, &tv);
-            if (selectResult <= 0)
-                break; /* timeout or error */
+            /* A USB-serial adapter that was unplugged hangs up the tty: poll reports
+             * it as readable forever while read() returns 0, so bail out instead of
+             * spinning until the timeout. */
+            if (pfd.revents & (POLLHUP | POLLERR | POLLNVAL))
+            {
+                WC_DEBUG("SerialPort::Read: port hung up or errored (revents=0x%x)", pfd.revents);
+                if (ioError)
+                    *ioError = true;
+                break;
+            }
 
             /* Find how many bytes are available to read */
             int avail = 0;
@@ -422,6 +610,8 @@ namespace WandererCover
             {
                 if (errno == EINTR || errno == EAGAIN)
                     continue;
+                if (ioError)
+                    *ioError = true;
                 break;
             }
 #endif
@@ -438,6 +628,7 @@ namespace WandererCover
         }
 
         /* On timeout, return any buffered partial data (if available) */
+        if (returnPartial)
         {
             std::lock_guard<std::mutex> lock(rxMutex);
             size_t copyLen = std::min((size_t)maxlen - 1, rxBuffer.size());
@@ -459,7 +650,7 @@ namespace WandererCover
         if (fd != -1)
         {
 #ifdef _WIN32
-            HANDLE h = (HANDLE)fd;
+            HANDLE h = (HANDLE)(intptr_t)fd;
             PurgeComm(h, PURGE_RXCLEAR | PURGE_TXCLEAR);
 #else
             tcflush((int)fd, TCIOFLUSH);
@@ -472,13 +663,19 @@ namespace WandererCover
         if (fd != -1)
         {
 #ifdef _WIN32
-            HANDLE h = (HANDLE)fd;
+            HANDLE h = (HANDLE)(intptr_t)fd;
             // Wait briefly; FlushFileBuffers already used after write
             FlushFileBuffers(h);
 #else
             tcdrain((int)fd);
 #endif
         }
+    }
+
+    void SerialPort::ClearRxBuffer()
+    {
+        std::lock_guard<std::mutex> lock(rxMutex);
+        rxBuffer.clear();
     }
 
 } /* namespace WandererCover */

@@ -25,8 +25,13 @@
 #ifndef WANDERER_COVER_SERIAL_PORT_H
 #define WANDERER_COVER_SERIAL_PORT_H
 
+#include <atomic>
+#include <cstdint>
 #include <string>
 #include <mutex>
+#ifndef _WIN32
+#include <termios.h>
+#endif
 
 /* ============================================================================
  * WANDERER COVER SDK - SERIAL PORT MODULE
@@ -39,11 +44,20 @@ namespace WandererCover
     class SerialPort
     {
     private:
-        intptr_t fd = -1;
+        std::atomic<intptr_t> fd{-1}; /* atomic: IsOpen() is called without the device's ioMutex */
         std::string rxBuffer; /* leftover bytes read from device */
         std::mutex rxMutex;   /* guards rxBuffer */
         int maxRetries = 3;   /* number of retries when port is busy */
         int retryDelayMs = 200; /* delay between retry attempts in milliseconds */
+
+        int ReadImpl(unsigned char *buf, int maxlen, char stop_char, int timeoutMs,
+                     bool returnPartial, bool *ioError);
+
+#ifndef _WIN32
+        struct termios originalSettings; /* port settings before Open changed them */
+        bool haveOriginalSettings = false;
+        int inUseLockFd = -1;            /* held lock on the port's in-use marker, see MarkInUse */
+#endif
 
     public:
         SerialPort() {}
@@ -52,8 +66,9 @@ namespace WandererCover
         /**
          * Open a serial port device.
          * 
-         * Implements retry logic for handling busy ports (e.g., when other tools
-         * are scanning the port). Uses exponential backoff between attempts.
+         * Polls every 50ms while the port is busy (e.g. another tool is scanning
+         * it), for up to maxRetries * retryDelayMs in total. Permission errors are
+         * only retried briefly, in case udev has not applied its rules yet.
          * 
          * @param portName Device path (e.g., "/dev/ttyUSB0" or "COM3")
          * @return true if successfully opened and configured
@@ -61,9 +76,9 @@ namespace WandererCover
         bool Open(const char *portName);
 
         /**
-         * Set retry parameters for opening the serial port.
-         * @param maxRetries Maximum number of retry attempts (default: 3)
-         * @param retryDelayMs Initial delay between attempts in milliseconds (default: 100)
+         * Set the total time budget for opening a busy port: maxRetries * retryDelayMs.
+         * @param maxRetries Multiplier for the budget (default: 3)
+         * @param retryDelayMs Milliseconds per unit of the budget (default: 200)
          */
         void SetRetryParams(int maxRetries, int retryDelayMs)
         {
@@ -75,6 +90,32 @@ namespace WandererCover
          * Close the serial port.
          */
         void Close();
+
+        /**
+         * Mark the port as in use (opened for a device, not just probed) until it
+         * is closed: holds an advisory lock on /tmp/ch34x-<port name>.lock (e.g.
+         * /tmp/ch34x-ttyUSB0.lock). Open() fails at once instead of waiting for a
+         * busy port whose marker is held. The convention is shared with other
+         * SDKs for CH34x-based devices, so their scans skip ports in use as well.
+         * The lock is released by Close() or when the process exits.
+         * @param portName Device path the port was opened with
+         */
+        void MarkInUse(const char *portName);
+
+        /**
+         * Put back the port settings found when it was opened (baud rate, mode),
+         * except that hang-up-on-close stays off so closing does not toggle DTR.
+         * Used after probing a port that turned out to belong to another device,
+         * which may be in use by another program.
+         */
+        void RestoreOriginalSettings();
+
+        /**
+         * Check whether the port has been hung up, e.g. because the USB device
+         * was unplugged. Does not consume any data.
+         * @return true if the port is open but no longer usable
+         */
+        bool IsHungUp();
 
         /**
          * Write data to the serial port.
@@ -99,6 +140,18 @@ namespace WandererCover
         int Read(unsigned char *buf, int maxlen, char stop_char, int timeoutMs);
 
         /**
+         * Read one complete message (terminated by stop_char) with timeout.
+         *
+         * Unlike Read(), a timeout never returns partial data - incomplete bytes
+         * stay buffered for the next call - so callers can poll in short slices.
+         *
+         * @param ioError Set to true if the port reported an error or hangup
+         *                (e.g. USB device unplugged); false on a plain timeout
+         * @return Number of bytes read including stop_char, 0 on timeout or error
+         */
+        int ReadMessage(unsigned char *buf, int maxlen, char stop_char, int timeoutMs, bool &ioError);
+
+        /**
          * Flush any pending input/output on the port (cross-platform)
          */
         void Flush();
@@ -107,6 +160,11 @@ namespace WandererCover
          * Ensure transmitted data has been physically sent (drain transmit buffer)
          */
         void Drain();
+
+        /**
+         * Clear the receive buffer of any stale data
+         */
+        void ClearRxBuffer();
 
         /**
          * Check if the serial port is open.

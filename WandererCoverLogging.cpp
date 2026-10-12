@@ -35,10 +35,12 @@ namespace WandererCover
 
     const char *WCGetTimestamp()
     {
-        static char timestamp[20];
+        /* Logged from API, scan worker and listener threads concurrently */
+        thread_local char timestamp[20];
         time_t now = time(nullptr);
-        struct tm *timeinfo = localtime(&now);
-        strftime(timestamp, sizeof(timestamp), "%H:%M:%S", timeinfo);
+        struct tm timeinfo;
+        localtime_r(&now, &timeinfo);
+        strftime(timestamp, sizeof(timestamp), "%H:%M:%S", &timeinfo);
         return timestamp;
     }
 
@@ -46,6 +48,7 @@ namespace WandererCover
     {
         va_list args;
         va_start(args, fmt);
+        flockfile(stderr);
         if (WandererCover::WC_TIMESTAMP_ENABLED)
         {
             fprintf(stderr, "[%s] [WC_DEBUG] ", WCGetTimestamp());
@@ -56,6 +59,7 @@ namespace WandererCover
         }
         vfprintf(stderr, fmt, args);
         fprintf(stderr, "\n");
+        funlockfile(stderr);
         va_end(args);
     }
 
@@ -63,6 +67,7 @@ namespace WandererCover
     {
         va_list args;
         va_start(args, fmt);
+        flockfile(stderr);
         if (WandererCover::WC_TIMESTAMP_ENABLED)
         {
             fprintf(stderr, "[%s] [WC_INFO] ", WCGetTimestamp());
@@ -73,6 +78,7 @@ namespace WandererCover
         }
         vfprintf(stderr, fmt, args);
         fprintf(stderr, "\n");
+        funlockfile(stderr);
         va_end(args);
     }
 
@@ -80,6 +86,7 @@ namespace WandererCover
     {
         va_list args;
         va_start(args, fmt);
+        flockfile(stderr);
         if (WandererCover::WC_TIMESTAMP_ENABLED)
         {
             fprintf(stderr, "[%s] [WC_ERROR] ", WCGetTimestamp());
@@ -90,6 +97,7 @@ namespace WandererCover
         }
         vfprintf(stderr, fmt, args);
         fprintf(stderr, "\n");
+        funlockfile(stderr);
         va_end(args);
     }
 

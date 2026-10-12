@@ -35,10 +35,10 @@ void PrintMenu()
 	printf("1. Get device status\n");
 	printf("2. Get device configuration\n");
 	printf("3. Open cover\n");
-	printf("4. Close cover (with angle)\n");
+	printf("4. Close cover\n");
 	printf("5. Set brightness level (0-255)\n");
 	printf("6. Set heater power (0-3)\n");
-	printf("7. Set ASIAIR control (0-3)\n");
+	printf("7. Set ASIAIR control (0 - off, 1 - on)\n");
 	printf("8. Set open position angle\n");
 	printf("9. Set close position angle\n");
 	printf("10. Refresh and display all info\n");
@@ -56,7 +56,7 @@ void DisplayStatus(int deviceId)
 		printf("Current Position: %.2f°\n", status.currentPositionAngle);
 		printf("Close Position: %.2f°\n", status.closePositionAngle);
 		printf("Open Position: %.2f°\n", status.openPositionAngle);
-		printf("Cover State: %s", status.coverState == 1 ? "OPEN" : (status.coverState == 0 ? "CLOSED" : (status.coverState == 2 ? "INTERMEDIATE" : "MOVING")));
+		printf("Cover State: %s\n", status.coverState == WC_COVER_STATE_OPEN ? "OPEN" : (status.coverState == WC_COVER_STATE_CLOSED ? "CLOSED" : (status.coverState == WC_COVER_STATE_INTERMEDIATE ? "INTERMEDIATE" : "MOVING")));
 	}
 	else
 	{
@@ -99,6 +99,21 @@ void DisplayAllInfo(int deviceId)
 
 	DisplayStatus(deviceId);
 	DisplayConfig(deviceId);
+}
+
+/* Poll until the cover has stopped moving (or 2 minutes passed) */
+static void WaitWhileMoving(int deviceId)
+{
+	WC_COVER_STATUS status;
+	for (int i = 0; i < 240; i++)
+	{
+		usleep(500000);
+		if (WCCoverGetStatus(deviceId, &status) != WC_SUCCESS || status.coverState != WC_COVER_STATE_MOVING)
+		{
+			return;
+		}
+	}
+	printf("[TIMEOUT] Cover still moving after 2 minutes\n");
 }
 
 int main(int argc, char *argv[])
@@ -204,8 +219,8 @@ int main(int argc, char *argv[])
 			result = WCCoverOpenCover(deviceId);
 			if (result == WC_SUCCESS)
 			{
-				printf("[OK] Cover opened\n");
-				usleep(1000000);  // Wait 1 second for status update
+				printf("[OK] Open command sent\n");
+				WaitWhileMoving(deviceId);
 				DisplayStatus(deviceId);
 			}
 			else
@@ -217,29 +232,17 @@ int main(int argc, char *argv[])
 
 		case 4:
 		{
-			printf("Enter close angle (0-360): ");
-			fflush(stdout);
-			if (fgets(input, sizeof(input), stdin) != NULL)
+			printf("Closing cover...\n");
+			result = WCCoverCloseCover(deviceId);
+			if (result == WC_SUCCESS)
 			{
-				float angle = atof(input);
-				if (angle < 0.0f || angle > 360.0f)
-				{
-					printf("[FAIL] Invalid angle (0-360)\n");
-					break;
-				}
-
-				printf("Closing cover...\n");
-				result = WCCoverCloseCover(deviceId);
-				if (result == WC_SUCCESS)
-				{
-					printf("[OK] Cover closed\n");
-					usleep(1000000);  // Wait 1 second for status update
-					DisplayStatus(deviceId);
-				}
-				else
-				{
-					printf("[FAIL] Failed to close cover (Error: %d)\n", result);
-				}
+				printf("[OK] Close command sent\n");
+				WaitWhileMoving(deviceId);
+				DisplayStatus(deviceId);
+			}
+			else
+			{
+				printf("[FAIL] Failed to close cover (Error: %d)\n", result);
 			}
 			break;
 		}
@@ -306,14 +309,14 @@ int main(int argc, char *argv[])
 
 		case 7:
 		{
-			printf("Enter ASIAIR control level (0-3): ");
+			printf("Enter ASIAIR control (0 - off, 1 - on): ");
 			fflush(stdout);
 			if (fgets(input, sizeof(input), stdin) != NULL)
 			{
 				int asiairControl = atoi(input);
-				if (asiairControl < 0 || asiairControl > 3)
+				if (asiairControl < 0 || asiairControl > 1)
 				{
-					printf("[FAIL] Invalid ASIAIR control level (0-3)\n");
+					printf("[FAIL] Invalid ASIAIR control (0 or 1)\n");
 					break;
 				}
 
@@ -336,14 +339,14 @@ int main(int argc, char *argv[])
 
 		case 8:
 		{
-			printf("Enter open position angle (0-360): ");
+			printf("Enter open position angle (0-359.9): ");
 			fflush(stdout);
 			if (fgets(input, sizeof(input), stdin) != NULL)
 			{
-				float angle = atof(input);
-				if (angle < 0.0f || angle > 360.0f)
+				float angle;
+				if (sscanf(input, "%f", &angle) != 1 || angle < 0.0f || angle > 359.9f)
 				{
-					printf("[FAIL] Invalid angle (0-360)\n");
+					printf("[FAIL] Invalid angle (0-359.9)\n");
 					break;
 				}
 
@@ -366,14 +369,14 @@ int main(int argc, char *argv[])
 
 		case 9:
 		{
-			printf("Enter close position angle (0-360): ");
+			printf("Enter close position angle (0 - below 300): ");
 			fflush(stdout);
 			if (fgets(input, sizeof(input), stdin) != NULL)
 			{
-				float angle = atof(input);
-				if (angle < 0.0f || angle > 360.0f)
+				float angle;
+				if (sscanf(input, "%f", &angle) != 1 || angle < 0.0f || angle >= 300.0f)
 				{
-					printf("[FAIL] Invalid angle (0-360)\n");
+					printf("[FAIL] Invalid angle (0 - below 300)\n");
 					break;
 				}
 

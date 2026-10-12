@@ -32,19 +32,28 @@
 #include <mutex>
 #include <thread>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 
 namespace WandererCover
 {
     /**
      * Device represents a Wanderer Cover device with its current state.
+     *
+     * Locking (acquire in this order, never the reverse):
+     *   g_globalMutex -> ioMutex -> stateMutex
+     * g_globalMutex only guards g_devices lookups and is never held while
+     * taking a device lock or doing serial I/O.
      */
     struct Device
     {
         std::shared_ptr<SerialPort> port;
         std::string portName;
+        std::atomic<bool> isOpen{false};
+
+        /* Device info and status, updated from the status messages the device
+         * broadcasts - guarded by stateMutex */
         std::string modelType;
-        std::atomic<bool> isOpen{false}; /* Kept atomic for consistency with the other SDKs' Device structs */
         int firmwareVersion = 0;
         float closePositionAngle = 0.0f;
         float openPositionAngle = 0.0f;
@@ -52,11 +61,17 @@ namespace WandererCover
         int brightness = 0;
         int heaterPower = 0;
         int asiairControl = 0;
-        int movingState = 0;
         bool isMoving = false;
-        /* Config mutexes etc */
+        std::chrono::steady_clock::time_point movingSince; /* When isMoving was last set */
+        std::mutex stateMutex;
+
+        /* Serializes Open, Close and command writes on this device. Callers
+         * must never hold g_globalMutex while taking it. */
+        std::mutex ioMutex;
+
+        /* Handshake: handshakePending is cleared by the listener (under
+         * handshakeMutex) when a status message has been parsed */
         std::mutex handshakeMutex;
-        std::mutex movingStateMutex; /* Protects isMoving from race conditions */
         std::condition_variable handshakeCV;
         std::atomic<bool> handshakePending{false};
 

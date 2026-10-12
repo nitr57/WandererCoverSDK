@@ -32,7 +32,7 @@
 
 namespace WandererCover
 {
-    bool SendCommand(std::shared_ptr<Device> device, const char *command, int timeoutMs)
+    bool SendCommand(std::shared_ptr<Device> device, const char *command)
     {
         if (!device || !device->port || !device->port->IsOpen())
         {
@@ -55,16 +55,34 @@ namespace WandererCover
         return true;
     }
 
+    /* The device stops broadcasting status while it moves. A status message
+     * that was already on its way when a move was commanded must not clear
+     * the moving flag, so only messages arriving this long after the command
+     * count as "move finished". */
+    static const int kMovingGraceMs = 150;
+
+    /* Clear the moving flag if no status message arrived for this long after a
+     * move command, so it can't stay set forever (e.g. a message was lost). */
+    static const int kMaxMoveMs = 120000;
+
+    /* Longest a blocked listener read can delay StopStatusListener */
+    static const int kListenerSliceMs = 200;
+
     /* Message parsing helper functions */
     static void ParseStatusMessage(Device* device, const char *buffer)
     {
         int firmware, heaterPower, brightness, asiairControl = 0;
         float voltage, closePosition, openPosition, currentPosition;
         char model[8];
-        
-        // Try parsing with asiairControl field (newer firmware)
-        int parsed = sscanf(buffer,
-                            "WandererCover%7[^A]A%dA%fA%fA%fA%fA%dA%dA%dA",
+        int end = 0;
+        int parsed;
+        {
+            ClassicNumericLocale numericLocale;
+
+            // Try parsing with asiairControl field (newer firmware). %n after the
+            // last 'A' rejects messages that were cut short.
+            parsed = sscanf(buffer,
+                            "WandererCover%7[^A]A%dA%fA%fA%fA%fA%dA%dA%dA%n",
                             model,
                             &firmware,
                             &closePosition,
@@ -73,27 +91,39 @@ namespace WandererCover
                             &voltage,
                             &brightness,
                             &heaterPower,
-                            &asiairControl);
-        
-        // If that fails, try parsing without asiairControl field (older firmware)
-        if (parsed != 9)
-        {
-            asiairControl = 0;  // Default value for older firmware
-            parsed = sscanf(buffer,
-                            "WandererCover%7[^A]A%dA%fA%fA%fA%fA%dA%dA",
-                            model,
-                            &firmware,
-                            &closePosition,
-                            &openPosition,
-                            &currentPosition,
-                            &voltage,
-                            &brightness,
-                            &heaterPower);
+                            &asiairControl,
+                            &end);
+
+            // If that fails, try parsing without asiairControl field (older firmware)
+            if (parsed != 9 || end == 0)
+            {
+                asiairControl = 0;  // Default value for older firmware
+                end = 0;
+                parsed = sscanf(buffer,
+                                "WandererCover%7[^A]A%dA%fA%fA%fA%fA%dA%dA%n",
+                                model,
+                                &firmware,
+                                &closePosition,
+                                &openPosition,
+                                &currentPosition,
+                                &voltage,
+                                &brightness,
+                                &heaterPower,
+                                &end);
+                if (end == 0)
+                {
+                    parsed = 0;
+                }
+            }
         }
         
-        if (parsed >= 8)
+        if (parsed < 8)
         {
-            // Store in device
+            return;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(device->stateMutex);
             device->modelType = std::string(model);
             device->firmwareVersion = firmware;
             device->closePositionAngle = closePosition;
@@ -119,50 +149,103 @@ namespace WandererCover
                 break;
             }
 
-            device->handshakePending = false;
+            /* Reset moving state, the device only sends data while not moving */
+            auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 std::chrono::steady_clock::now() - device->movingSince).count();
+            if (elapsedMs > kMovingGraceMs)
+            {
+                device->isMoving = false;
+            }
         }
 
-        device->handshakeCV.notify_one();
+        {
+            std::lock_guard<std::mutex> lock(device->handshakeMutex);
+            device->handshakePending = false;
+        }
+        device->handshakeCV.notify_all();
+    }
+
+    /* Background listener thread body for status messages */
+    static void StatusListenerThreadBody(Device* device)
+    {
+        char buffer[256];
+        static const char kPrefix[] = "WandererCover";
+        const size_t prefixLen = sizeof(kPrefix) - 1;
+
+        while(device->statusListenerRunning)
+        {
+            if (!device->port || !device->port->IsOpen())
+            {
+                WC_DEBUG("StatusListener: Port not open, exiting");
+                break;
+            }
+
+            /* Short slices so StopStatusListener (Close) is never delayed long */
+            bool ioError = false;
+            int len = device->port->ReadMessage((unsigned char *)buffer, sizeof(buffer), '\n', kListenerSliceMs, ioError);
+            if (len > 0)
+            {
+                /* Status message. Use the last "WandererCover" in the line: after
+                 * power-up the first line may start with junk bytes (possibly
+                 * NULs, hence memmem), and a port opened mid-broadcast yields a
+                 * truncated message followed by a complete one. */
+                const char *status = nullptr;
+                for (const char *p = buffer; p < buffer + len;)
+                {
+                    const char *found = (const char *)memmem(p, buffer + len - p, kPrefix, prefixLen);
+                    if (!found)
+                        break;
+                    status = found;
+                    p = found + 1;
+                }
+
+                if (status)
+                {
+                    ParseStatusMessage(device, status);
+                }
+            }
+            else if (ioError)
+            {
+                /* e.g. the device was unplugged - nothing more will arrive */
+                WC_ERROR("StatusListener: Serial port error, device disconnected?");
+                break;
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(device->stateMutex);
+                if (device->isMoving &&
+                    std::chrono::steady_clock::now() - device->movingSince > std::chrono::milliseconds(kMaxMoveMs))
+                {
+                    WC_ERROR("StatusListener: No status from the device %d s after a move, assuming it stopped",
+                             kMaxMoveMs / 1000);
+                    device->isMoving = false;
+                }
+            }
+        }
     }
 
     /* Background listener thread function for status messages */
     static void StatusListenerThreadFunc(Device* device)
     {
-        char buffer[256];
-
-        while(device->statusListenerRunning)
+        try
         {
-            if (!device->port)
-            {
-                WC_DEBUG("StatusListener: Port unavailable, exiting");
-                device->statusListenerRunning = false;
-                return;
-            }
-
-            if (!device->port->IsOpen())
-            {
-                WC_DEBUG("StatusListener: Port not open, exiting");
-                device->statusListenerRunning = false;
-                return;
-            }
-
-            if (device->port->Read((unsigned char *)buffer, 256, '\n', 5000))
-            {
-                /* Parse different message types based on prefix */
-                if (strstr(buffer, "WandererCover") == buffer)
-                {
-                    /* Status message */
-                    ParseStatusMessage(device, buffer);
-
-                    /* Reset moving state, the device only sends data while not moving */
-                    {
-                        std::lock_guard<std::mutex> lock(device->movingStateMutex);
-                        device->isMoving = false;
-                    }
-                }
-            }
+            StatusListenerThreadBody(device);
+        }
+        catch (...)
+        {
+            /* An exception escaping a std::thread would call std::terminate */
+            WC_ERROR("StatusListener: unexpected exception, stopping");
         }
 
+        try
+        {
+            std::lock_guard<std::mutex> lock(device->stateMutex);
+            device->isMoving = false;
+        }
+        catch (...)
+        {
+        }
+        device->statusListenerRunning = false;
         WC_DEBUG("StatusListener: exiting");
     }
 
